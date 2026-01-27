@@ -1,0 +1,5 @@
+.*.sw[a-z]
+Session.vim
+zig-out
+zig-pkg
+.zig-cache

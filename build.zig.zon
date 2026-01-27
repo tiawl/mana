@@ -1,0 +1,19 @@
+.{
+    .name = .mana,
+    .version = "0.0.0",
+    .fingerprint = 0x60d64632ff8733b3,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .protobuf = .{
+            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#50f1b1ccc064ab24db054a0be8f79c7692c7e6e5",
+            .hash = "protobuf-5.0.0-0e82antLKADQjGxTrKKjPiM6zV76ZXaeHjuys8GS1OFH",
+        },
+        .zon = .{
+            .url = "git+https://github.com/tiawl-forks/zon.zig?ref=zig-nightly#76c50113c856bb188f2392cb59c9b3c6c5b541d5",
+            .hash = "zon-0.0.5-9stQDQsQBQBXvnTJmatt6kpZEjDbHBn4wSaZO8V_kMH9",
+        },
+    },
+    .paths = .{
+        "",
+    },
+}
