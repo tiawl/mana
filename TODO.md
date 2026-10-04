@@ -1,0 +1,7 @@
+- add verbose mode
+- split InitTask into GroupTask + CallTask ??
+- add ReadZonTask + IncludeTask
+- hash the key into Scheduler.addTask()
+- add oniguruma for jq
+- add plugin system for custom tasks/modules
+- build.zig: tests
