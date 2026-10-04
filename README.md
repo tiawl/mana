@@ -1,6 +1,6 @@
 # mana
 
-Docker Engine driven by Zig Compiler to build a custom infra
+A declarative Docker Engine scheduler
 
 ## License
 

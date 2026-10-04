@@ -1,0 +1,12 @@
+.{
+    .@"build-base" = .{
+        .@"docker-build/base" = .{
+            .version = "v1.56",
+            .ctx = "dockerfiles/base",
+            .t = "base:latest",
+            .dependencies = .{
+                .it_should_fail = "because of this struct",
+            },
+        },
+    },
+}

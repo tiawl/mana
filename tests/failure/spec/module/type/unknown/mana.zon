@@ -1,0 +1,9 @@
+.{
+    .@"get-platform" = .{
+        .@"unknown-type/test" = .{
+            .endpoint = "/version",
+            .version = "v1.56",
+            .method = .GET,
+        },
+    },
+}

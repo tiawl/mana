@@ -1,0 +1,10 @@
+.{
+    .@"get-platform" = .{
+        .@"docker/docker_version" = .{
+            .endpoint = "/version",
+            .version = "v1.56",
+            .method = .GET,
+            .@"\It_should_fail_because_of" = "this_escaped_character",
+        },
+    },
+}

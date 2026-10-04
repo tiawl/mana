@@ -1,0 +1,15 @@
+.{
+    .@"get-platform" = .{
+        .@"docker/docker_version" = .{
+            .endpoint = "/version",
+            .version = "v1.56",
+            .method = .GET,
+        },
+        .@"jq/get_platform" = .{
+            .filter = "halt_error(1)",
+            .dependencies = .{
+                .@"docker/docker_version",
+            },
+        },
+    },
+}

@@ -1,0 +1,17 @@
+.{
+    .@"get-platform" = .{
+        .@"docker/docker_version" = .{
+            .endpoint = "/version",
+            .version = "v1.56",
+            .method = .GET,
+            .parameters = .{},
+            .dependencies = .{},
+        },
+        .@"jq/get_platform" = .{
+            .filter = ".[\"docker/docker_version\"][0].Platform.Name | stderr",
+            .dependencies = .{
+                .@"docker/docker_version",
+            },
+        },
+    },
+}
