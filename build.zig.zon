@@ -1,12 +1,21 @@
 .{
     .name = .mana,
     .version = "0.0.0",
+    .description = "A highly-configurable Docker client",
     .fingerprint = 0x60d64632ff8733b3,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .protobuf = .{
-            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#50f1b1ccc064ab24db054a0be8f79c7692c7e6e5",
-            .hash = "protobuf-5.0.0-0e82antLKADQjGxTrKKjPiM6zV76ZXaeHjuys8GS1OFH",
+            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#60eeab2f0b56d8a8c54459bf33ce6025f6d0d6fb",
+            .hash = "protobuf-7.0.0-0e82aq5hNAAN_EDpFO9l7GjwEQIca03ubdxMK7K0Sb6k",
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/tiawl/translate-c?ref=fix#43272fe55f079c0a34bc4140d28a1f1a471e883f",
+            .hash = "translate_c-0.0.0-Q_BUWqJPBwC86nStjWUUiky19HRGb0Qv3wlZ1TdLwAl1",
+        },
+        .jq = .{
+            .url = "git+https://github.com/jqlang/jq#633ae6058a05b0240c798f6b7b60d3b0a87cab8e",
+            .hash = "N-V-__8AAL89SQBh4XDBVOzjYz_LfACGE3EP2Xe9q8CFwdQE",
         },
     },
     .paths = .{
