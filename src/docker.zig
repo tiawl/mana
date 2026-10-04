@@ -1,6 +1,7 @@
 const std = @import("std");
 const build = @import("build");
 const buildkit = @import("buildkit").v1;
+const json = @import("json");
 
 const user_agent = build.name ++ "-" ++ build.version;
 
@@ -110,9 +111,9 @@ pub const Client = struct {
     host: Host,
     verbose: bool,
 
-    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) @This() {
+    pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) @This() {
         var self: @This() = .{
-            .arena = arena,
+            .arena = arena.allocator(),
             .gpa = gpa,
             .http_client = .{
                 .allocator = gpa,
@@ -210,47 +211,6 @@ pub const Client = struct {
         }
     }
 
-    pub fn freeValue(self: @This(), value: *std.json.Value) void {
-        switch (value.*) {
-            .number_string, .string => |s| self.gpa.free(s),
-            .array => |*a| {
-                for (a.items) |*item| self.freeValue(item);
-                a.deinit();
-            },
-            .object => |*o| {
-                var it = o.iterator();
-                while (it.next()) |*entry| {
-                    self.gpa.free(entry.key_ptr.*);
-                    self.freeValue(entry.value_ptr);
-                }
-                o.deinit(self.gpa);
-            },
-            else => {},
-        }
-    }
-
-    fn cloneValue(self: @This(), value: *const std.json.Value) !std.json.Value {
-        return switch (value.*) {
-            .null => .{ .null = {} },
-            .bool => |b| .{ .bool = b },
-            .integer => |i| .{ .integer = i },
-            .float => |f| .{ .float = f },
-            .number_string => |s| .{ .number_string = try self.gpa.dupe(u8, s) },
-            .string => |s| .{ .string = try self.gpa.dupe(u8, s) },
-            .array => |a| blk: {
-                var new_arr = std.json.Array.init(self.gpa);
-                for (a.items) |*item| try new_arr.append(try self.cloneValue(item));
-                break :blk .{ .array = new_arr };
-            },
-            .object => |o| blk: {
-                var new_obj: std.json.ObjectMap = .empty;
-                var it = o.iterator();
-                while (it.next()) |*entry| try new_obj.put(self.gpa, try self.gpa.dupe(u8, entry.key_ptr.*), try self.cloneValue(entry.value_ptr));
-                break :blk .{ .object = new_obj };
-            },
-        };
-    }
-
     fn verboseRequest(self: @This(), req: *const std.http.Client.Request) void {
         if (!self.verbose) return;
         std.log.debug("> {s} {s} {s}", .{
@@ -275,18 +235,18 @@ pub const Client = struct {
         for (req.privileged_headers) |header| std.log.debug("> {s}: {s}", .{ header.name, header.value });
     }
 
-    fn verboseResponse(self: @This(), response: *const std.http.Client.Response) void {
+    fn verboseResponse(self: @This(), http_response: *const std.http.Client.Response) void {
         if (!self.verbose) return;
-        var response_it = response.head.iterateHeaders();
+        var http_response_it = http_response.head.iterateHeaders();
         std.log.debug("< HTTP {d} {s}", .{
-            @backingInt(response.head.status), @tagName(response.head.status),
+            @backingInt(http_response.head.status), @tagName(http_response.head.status),
         });
-        while (response_it.next()) |header| {
+        while (http_response_it.next()) |header| {
             std.log.debug("< {s}: {s}", .{ header.name, header.value });
         }
     }
 
-    fn sendInner(self: *@This(), sender: *const Sender.Interface, req_body: *std.json.Value) !void {
+    fn sendInner(self: *@This(), allocator: std.mem.Allocator, response: *const Response.Interface, req_body: *std.json.Value) !std.json.Value {
         std.debug.assert(std.meta.activeTag(req_body.*) == .object);
         std.debug.assert(req_body.object.getPtr("version") != null);
         std.debug.assert(std.meta.activeTag(req_body.object.getPtr("version").?.*) == .string);
@@ -332,23 +292,23 @@ pub const Client = struct {
 
         var req = try self.http_client.request(std.meta.stringToEnum(std.http.Method, req_body.object.getPtr("method").?.string).?, uri, .{
             .connection = self.connection,
-            .headers = sender.headers,
+            .headers = response.headers,
         });
         defer req.deinit();
         self.verboseRequest(&req);
 
-        if (sender.body.len > 0) try req.sendBodyComplete(sender.body) else try req.sendBodiless();
+        if (response.body.len > 0) try req.sendBodyComplete(response.body) else try req.sendBodiless();
 
         const redirect_buffer: []u8 = try self.gpa.alloc(u8, 8 * 1024);
         defer self.gpa.free(redirect_buffer);
 
-        var response = try req.receiveHead(redirect_buffer);
-        self.verboseResponse(&response);
+        var http_response = try req.receiveHead(redirect_buffer);
+        self.verboseResponse(&http_response);
 
-        var response_body: std.Io.Writer.Allocating = .init(self.gpa);
-        defer response_body.deinit();
+        var http_response_body: std.Io.Writer.Allocating = .init(self.gpa);
+        defer http_response_body.deinit();
 
-        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        const decompress_buffer: []u8 = switch (http_response.head.content_encoding) {
             .identity => &.{},
             .zstd => try self.gpa.alloc(u8, std.compress.zstd.default_window_len),
             .deflate, .gzip => try self.gpa.alloc(u8, std.compress.flate.max_window_len),
@@ -357,21 +317,22 @@ pub const Client = struct {
 
         var transfer_buffer: [64]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
-        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        const reader = http_response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
         var scanner: std.json.Scanner = undefined;
         var diag: std.json.Diagnostics = .{};
         var parsed: std.json.Value = undefined;
+        var output: std.json.Value = .{ .array = .init(allocator) };
 
         while (true) {
-            _ = reader.streamDelimiter(&response_body.writer, '\n') catch |err| switch (err) {
-                error.ReadFailed => return response.bodyErr().?,
+            _ = reader.streamDelimiter(&http_response_body.writer, '\n') catch |err| switch (err) {
+                error.ReadFailed => return http_response.bodyErr().?,
                 error.EndOfStream => break,
                 else => return err,
             };
             _ = reader.toss(1);
 
-            const written = response_body.written();
+            const written = http_response_body.written();
             scanner = std.json.Scanner.initCompleteInput(self.gpa, written);
             defer scanner.deinit();
 
@@ -384,18 +345,18 @@ pub const Client = struct {
                 return err;
             };
 
-            try sender.processJSON(&parsed);
+            try response.process(&output, &parsed);
 
-            response_body.clearRetainingCapacity();
+            http_response_body.clearRetainingCapacity();
         }
+
+        return output;
     }
 
-    pub fn send(self: *@This(), writer: *std.Io.Writer, req_body: *std.json.Value) !void {
-        var default_impl: Sender.Impl.Default = .{
-            .writer = writer,
-        };
-        const sender = default_impl.sender();
-        try self.sendInner(&sender, req_body);
+    pub fn send(self: *@This(), allocator: std.mem.Allocator, req_body: *std.json.Value) !std.json.Value {
+        var default_impl: Response.Impl.Default = .{};
+        const response = default_impl.response();
+        return try self.sendInner(allocator, &response, req_body);
     }
 
     fn writeCtxArchive(self: @This(), writer: *std.Io.Writer, req_body: *std.json.Value) !void {
@@ -436,7 +397,7 @@ pub const Client = struct {
         }
     }
 
-    pub fn sendBuild(self: *@This(), req_body: *std.json.Value) !void {
+    pub fn sendBuild(self: *@This(), allocator: std.mem.Allocator, req_body: *std.json.Value) !std.json.Value {
         std.debug.assert(std.meta.activeTag(req_body.*) == .object);
         std.debug.assert(req_body.object.getPtr("ctx") != null);
         std.debug.assert(std.meta.activeTag(req_body.object.getPtr("ctx").?.*) == .string);
@@ -453,35 +414,35 @@ pub const Client = struct {
 
         try self.writeCtxArchive(&archive_buf.writer, req_body);
 
-        var json: std.json.Value = .{ .object = .empty };
-        defer json.object.deinit(self.gpa);
-        try json.object.put(self.gpa, "version", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("version").?.string) });
-        defer self.gpa.free(json.object.getPtr("version").?.string);
-        try json.object.put(self.gpa, "endpoint", .{ .string = "/build" });
-        try json.object.put(self.gpa, "method", .{ .string = "POST" });
+        var req_body_json: std.json.Value = .{ .object = .empty };
+        defer req_body_json.object.deinit(self.gpa);
+        try req_body_json.object.put(self.gpa, "version", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("version").?.string) });
+        defer self.gpa.free(req_body_json.object.getPtr("version").?.string);
+        try req_body_json.object.put(self.gpa, "endpoint", .{ .string = "/build" });
+        try req_body_json.object.put(self.gpa, "method", .{ .string = "POST" });
 
-        try json.object.put(self.gpa, "parameters", try self.cloneValue(req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
-        defer self.freeValue(json.object.getPtr("parameters").?);
+        try req_body_json.object.put(self.gpa, "parameters", try json.cloneValue(self.gpa, req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
+        defer json.freeValue(self.gpa, req_body_json.object.getPtr("parameters").?);
 
-        try json.object.getPtr("parameters").?.object.put(self.gpa, "version", .{ .integer = 2 });
-        defer _ = json.object.getPtr("parameters").?.object.swapRemove("version");
-        try json.object.getPtr("parameters").?.object.put(self.gpa, "t", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("t").?.string) });
+        try req_body_json.object.getPtr("parameters").?.object.put(self.gpa, "version", .{ .integer = 2 });
+        defer _ = req_body_json.object.getPtr("parameters").?.object.swapRemove("version");
+        try req_body_json.object.getPtr("parameters").?.object.put(self.gpa, "t", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("t").?.string) });
         defer {
-            self.gpa.free(json.object.getPtr("parameters").?.object.getPtr("t").?.string);
-            _ = json.object.getPtr("parameters").?.object.swapRemove("t");
+            self.gpa.free(req_body_json.object.getPtr("parameters").?.object.getPtr("t").?.string);
+            _ = req_body_json.object.getPtr("parameters").?.object.swapRemove("t");
         }
 
-        var build_impl: Sender.Impl.Build = .{
+        var build_impl: Response.Impl.Build = .{
             .arena = self.arena,
         };
-        const sender = build_impl.sender(&archive_buf);
-        try self.sendInner(&sender, &json);
+        const response = build_impl.response(&archive_buf);
+        return try self.sendInner(allocator, &response, &req_body_json);
     }
 
-    const Sender = struct {
+    const Response = struct {
         const Interface = struct {
             const VTable = struct {
-                process_json_fn: *const fn (*anyopaque, *const std.json.Value) anyerror!void,
+                process_fn: *const fn (*anyopaque, *std.json.Value, *const std.json.Value) anyerror!void,
             };
 
             ptr: *anyopaque,
@@ -489,25 +450,25 @@ pub const Client = struct {
             body: []u8 = "",
             headers: std.http.Client.Request.Headers,
 
-            fn processJSON(self: @This(), parsed: *const std.json.Value) !void {
-                try self.vtable.process_json_fn(self.ptr, parsed);
+            fn process(self: @This(), output: *std.json.Value, parsed: *const std.json.Value) !void {
+                std.debug.assert(std.meta.activeTag(output.*) == .array);
+                try self.vtable.process_fn(self.ptr, output, parsed);
             }
         };
 
         const Impl = struct {
             const Default = struct {
-                writer: *std.Io.Writer,
-
-                fn processJSON(ptr: *anyopaque, parsed: *const std.json.Value) !void {
+                fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) !void {
                     const self: *@This() = @ptrCast(@alignCast(ptr));
-                    try std.json.Stringify.value(parsed.*, .{}, self.writer);
+                    _ = self;
+                    try output.array.append(try json.cloneValue(output.array.allocator, parsed));
                 }
 
-                fn sender(self: *@This()) Client.Sender.Interface {
+                fn response(self: *@This()) Client.Response.Interface {
                     return .{
                         .ptr = self,
                         .vtable = &.{
-                            .process_json_fn = @This().processJSON,
+                            .process_fn = @This().process,
                         },
                         .headers = .{
                             .user_agent = .{
@@ -524,7 +485,8 @@ pub const Client = struct {
                 proto_reader: std.Io.Reader = undefined,
                 status_resp: buildkit.StatusResponse = undefined,
 
-                fn processJSON(ptr: *anyopaque, parsed: *const std.json.Value) !void {
+                fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) !void {
+                    _ = output;
                     const self: *@This() = @ptrCast(@alignCast(ptr));
 
                     if (parsed.object.get("id")) |id| {
@@ -559,11 +521,11 @@ pub const Client = struct {
                     } else unreachable;
                 }
 
-                fn sender(self: *@This(), w: *std.Io.Writer.Allocating) Client.Sender.Interface {
+                fn response(self: *@This(), w: *std.Io.Writer.Allocating) Client.Response.Interface {
                     return .{
                         .ptr = self,
                         .vtable = &.{
-                            .process_json_fn = @This().processJSON,
+                            .process_fn = @This().process,
                         },
                         .body = w.written(),
                         .headers = .{
