@@ -1,0 +1,9 @@
+.{
+    .@"build-base" = .{
+        .@"docker-build/base" = .{
+            .version = "v1.56\I",
+            .ctx = "dockerfiles/base",
+            .t = "base:latest",
+        },
+    },
+}

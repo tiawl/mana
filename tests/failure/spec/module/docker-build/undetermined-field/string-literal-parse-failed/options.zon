@@ -1,0 +1,6 @@
+.{
+    .args = .{
+        "build-base",
+    },
+    .err = "DockerBuildModuleUndeterminedFieldZigStringLiteralInvalidEscapeCharacter",
+}

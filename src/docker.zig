@@ -1,6 +1,8 @@
 const std = @import("std");
 const build = @import("build");
 const buildkit = @import("buildkit").v1;
+const c = @import("jq");
+const protobuf = @import("protobuf");
 
 const user_agent = build.name ++ "-" ++ build.version;
 
@@ -11,7 +13,7 @@ fn trim(slice: []const u8) []const u8 {
 const Plain = struct {
     connection: std.http.Client.Connection,
 
-    fn create(http_client: *std.http.Client, remote_host: []const u8, port: u16, stream: std.Io.net.Stream) error{OutOfMemory}!*@This() {
+    fn create(http_client: *std.http.Client, remote_host: []const u8, port: u16, stream: std.Io.net.Stream) std.mem.Allocator.Error!*@This() {
         const io = http_client.io;
         const gpa = http_client.allocator;
         const alloc_len = allocLen(http_client, remote_host.len);
@@ -39,10 +41,10 @@ const Plain = struct {
     }
 
     fn destroy(plain: *@This()) void {
-        const c = &plain.connection;
-        const gpa = c.client.allocator;
+        const connection = &plain.connection;
+        const gpa = connection.client.allocator;
         const base: [*]align(@alignOf(@This())) u8 = @ptrCast(plain);
-        gpa.free(base[0..allocLen(c.client, c.host_len)]);
+        gpa.free(base[0..allocLen(connection.client, connection.host_len)]);
     }
 
     fn allocLen(http_client: *std.http.Client, host_len: usize) usize {
@@ -76,507 +78,584 @@ const Host = struct {
     };
 
     const default: @This() = .{
+        .gpa = null,
         .scheme = DEFAULT_SCHEME,
         .name = DEFAULT_UNIX_HOST,
         .port = 0,
     };
 
+    gpa: ?std.mem.Allocator,
     scheme: Scheme,
     name: []const u8,
     port: u16,
 
-    fn unix(path: []const u8) @This() {
+    fn unix(gpa: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error!@This() {
         return .{
+            .gpa = gpa,
             .scheme = .unix,
-            .name = path,
+            .name = try gpa.dupe(u8, path),
             .port = 0,
         };
     }
 
-    fn tcp(hostname: []const u8, port: ?u16) @This() {
+    fn tcp(gpa: std.mem.Allocator, hostname: []const u8, port: ?u16) std.mem.Allocator.Error!@This() {
         return .{
+            .gpa = gpa,
             .scheme = .tcp,
-            .name = hostname,
+            .name = try gpa.dupe(u8, hostname),
             .port = port orelse DEFAULT_TCP_PORT,
         };
     }
+
+    fn deinit(self: *@This()) void {
+        if (self.gpa) |gpa| gpa.free(self.name);
+    }
 };
 
-pub const Client = struct {
-    arena: std.mem.Allocator,
-    gpa: std.mem.Allocator,
-    http_client: std.http.Client,
-    connection: *std.http.Client.Connection,
-    host: Host,
-    verbose: bool,
+pub fn Client(comptime Logger: type) type {
+    if (!std.meta.hasFn(Logger, "warn")) @compileError(@typeName(Logger) ++ " does't have warn function");
+    if (@TypeOf(@field(Logger, "warn")) != fn ([]const u8, anytype) void) @compileError(@typeName(Logger) ++ " warn field must be `fn([]const u8, anytype) void` typed but is `" ++ @typeName(@TypeOf(@field(Logger, "warn"))) ++ "` typed");
+    if (!std.meta.hasFn(Logger, "debug")) @compileError(@typeName(Logger) ++ " does't have debug function");
+    if (@TypeOf(@field(Logger, "debug")) != fn (anytype) void) @compileError(@typeName(Logger) ++ " debug field must be `fn(anytype) void` typed but is `" ++ @typeName(@TypeOf(@field(Logger, "debug"))) ++ "` typed");
+    if (!std.meta.hasFn(Logger, "err")) @compileError(@typeName(Logger) ++ " does't have err function");
+    if (@TypeOf(@field(Logger, "err")) != fn (anyerror, []const u8, anytype) void) @compileError(@typeName(Logger) ++ " err field must be `fn(anyerror, []const u8, anytype) void` typed but is `" ++ @typeName(@TypeOf(@field(Logger, "err"))) ++ "` typed");
+    return struct {
+        arena: std.mem.Allocator,
+        gpa: std.mem.Allocator,
+        http_client: std.http.Client,
+        connection: *std.http.Client.Connection,
+        mutex: std.Io.Mutex,
+        host: Host,
+        verbose: bool,
 
-    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) @This() {
-        var self: @This() = .{
-            .arena = arena,
-            .gpa = gpa,
-            .http_client = .{
-                .allocator = gpa,
-                .io = io,
-            },
-            .connection = undefined,
-            .host = .default,
-            .verbose = environ.containsConstant("VERBOSE"),
-        };
+        pub const SendError = SendInnerError;
+        pub const SendBuildError = SendInnerError || WriteCtxArchiveError || std.Io.Dir.StatFileError;
 
-        if (environ.getAlloc(self.gpa, "DOCKER_HOST")) |*docker_host| {
-            defer self.gpa.free(docker_host.*);
-            const trimmed_host = trim(docker_host.*);
-
-            if (trimmed_host.len == 0) {
-                std.log.warn("DOCKER_HOST is empty. Using default host.", .{});
-                return self;
-            }
-
-            const uri = std.Uri.parse(trimmed_host) catch std.Uri.parse(std.fmt.allocPrint(self.gpa, "{s}://{s}", .{ @tagName(Host.DEFAULT_SCHEME), trimmed_host }) catch {
-                std.log.warn("OutOfMemory when allocating prefix for DOCKER_HOST. Using default host.", .{});
-                return self;
-            }) catch |err| {
-                std.log.warn("{s}: DOCKER_HOST can't be parsed: \"{s}\". Using default host.", .{ @errorName(err), trimmed_host });
-                return self;
+        pub fn init(arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) @This() {
+            var self: @This() = .{
+                .arena = arena_instance.allocator(),
+                .gpa = gpa,
+                .http_client = .{
+                    .allocator = gpa,
+                    .io = io,
+                },
+                .connection = undefined,
+                .mutex = .init,
+                .host = .default,
+                .verbose = environ.containsConstant("VERBOSE"),
             };
-            const uri_path = uri.path.toRawMaybeAlloc(self.gpa) catch {
-                std.log.warn("OutOfMemory when allocating for DOCKER_HOST uri path. Using default host.", .{});
-                return self;
-            };
-            var uri_host: std.Io.net.HostName = undefined;
-            var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-            if (uri_path.len == 0) {
-                uri_host = std.Io.net.HostName.fromUri(uri, &host_buf) catch |err| {
-                    std.log.warn("{s}: DOCKER_HOST uri hostname can't be parsed. Using default host.", .{@errorName(err)});
+
+            if (environ.getAlloc(self.gpa, "DOCKER_HOST")) |*docker_host| {
+                defer self.gpa.free(docker_host.*);
+                const trimmed_host = trim(docker_host.*);
+
+                if (trimmed_host.len == 0) {
+                    Logger.warn("DOCKER_HOST is empty. Using default host.", @src());
+                    return self;
+                }
+
+                var allocated = false;
+                var prefixed_uri: []const u8 = undefined;
+                defer if (allocated) self.gpa.free(prefixed_uri);
+                const uri = std.Uri.parse(trimmed_host) catch blk: {
+                    prefixed_uri = self.gpa.print("{s}://{s}", .{ @tagName(Host.DEFAULT_SCHEME), trimmed_host }) catch {
+                        Logger.warn("Out of memory when allocating prefix for DOCKER_HOST. Using default host.", @src());
+                        return self;
+                    };
+                    allocated = true;
+                    break :blk std.Uri.parse(prefixed_uri) catch {
+                        Logger.warn("DOCKER_HOST can't be parsed. Using default host.", @src());
+                        return self;
+                    };
+                };
+                const uri_path = uri.path.toRawMaybeAlloc(self.gpa) catch {
+                    Logger.warn("Out of memory when allocating for DOCKER_HOST uri path. Using default host.", @src());
                     return self;
                 };
-                if (uri_host.bytes.len == 0) {
-                    std.log.warn("DOCKER_HOST uri hostname is empty. Using default host.", .{});
+                var uri_host: std.Io.net.HostName = undefined;
+                var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+                if (uri_path.len == 0) {
+                    uri_host = std.Io.net.HostName.fromUri(uri, &host_buf) catch {
+                        Logger.warn("DOCKER_HOST uri hostname can't be parsed. Using default host.", @src());
+                        return self;
+                    };
+                    if (uri_host.bytes.len == 0) {
+                        Logger.warn("DOCKER_HOST uri hostname is empty. Using default host.", @src());
+                        return self;
+                    }
+                }
+
+                if (std.meta.stringToEnum(Host.Scheme, uri.scheme)) |scheme| {
+                    switch (scheme) {
+                        .unix => {
+                            checkUnixSocket(self.http_client.io, uri_path) catch {
+                                Logger.warn("DOCKER_HOST uri path doesn't exist or isn't a unix socket. Using default host.", @src());
+                                return self;
+                            };
+                            self.host = Host.unix(gpa, uri_path) catch {
+                                Logger.warn("Out of memory when duping unix socket path for DOCKER_HOST. Using default host.", @src());
+                                return self;
+                            };
+                        },
+                        .tcp => self.host = Host.tcp(gpa, uri_host.bytes, uri.port) catch {
+                            Logger.warn("Out of memory when duping tcp host name for DOCKER_HOST. Using default host.", @src());
+                            return self;
+                        },
+                    }
+                } else {
+                    Logger.warn("DOCKER_HOST uses an unknown scheme. Using default host.", @src());
                     return self;
                 }
+            } else |_| {}
+
+            return self;
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.host.deinit();
+            self.http_client.deinit();
+        }
+
+        const ConnectUnixError = std.Io.net.UnixAddress.InitError || std.Io.net.UnixAddress.ConnectError || std.Io.Cancelable || std.mem.Allocator.Error;
+
+        fn connectUnix(self: *@This()) ConnectUnixError!void {
+            const path = self.host.name;
+            if (try self.http_client.connection_pool.findConnection(self.http_client.io, .{
+                .host = .{ .bytes = path },
+                .port = 0,
+                .protocol = .plain,
+            })) |conn| {
+                self.connection = conn;
+                return;
             }
 
-            if (std.meta.stringToEnum(Host.Scheme, uri.scheme)) |scheme| {
-                switch (scheme) {
-                    .unix => {
-                        checkUnixSocket(self.http_client.io, uri_path) catch |err| {
-                            std.log.warn("{s}: DOCKER_HOST uri path \"{s}\". Using default host.", .{ @errorName(err), uri_path });
-                            return self;
-                        };
-                        self.host = .unix(uri_path);
-                    },
-                    .tcp => self.host = .tcp(uri_host.bytes, uri.port),
-                }
-            } else unreachable;
-        } else |_| {}
+            const ua = try std.Io.net.UnixAddress.init(path);
+            var stream = try ua.connect(self.http_client.io);
+            errdefer stream.close(self.http_client.io);
 
-        return self;
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.http_client.deinit();
-    }
-
-    // fixed version of std.http.Client.connectUnix()
-    fn connectUnix(self: *@This()) !void {
-        const path = self.host.name;
-        if (try self.http_client.connection_pool.findConnection(self.http_client.io, .{
-            .host = .{ .bytes = path },
-            .port = 0,
-            .protocol = .plain,
-        })) |conn| {
-            self.connection = conn;
-            return;
+            const pc = try Plain.create(&self.http_client, path, 0, stream);
+            errdefer pc.destroy();
+            try self.http_client.connection_pool.addUsed(self.http_client.io, &pc.connection);
+            self.connection = &pc.connection;
         }
 
-        const ua = try std.Io.net.UnixAddress.init(path);
-        var stream = try ua.connect(self.http_client.io);
-        errdefer stream.close(self.http_client.io);
+        const ConnectTcpError = std.http.Client.ConnectTcpError || std.Io.net.HostName.ValidateError;
 
-        const pc = try Plain.create(&self.http_client, path, 0, stream);
-        errdefer pc.destroy();
-        try self.http_client.connection_pool.addUsed(self.http_client.io, &pc.connection);
-        self.connection = &pc.connection;
-    }
-
-    fn connectTcp(self: *@This()) !void {
-        self.connection = try self.http_client.connectTcp(try .init(self.host.name), self.host.port, .plain);
-    }
-
-    fn connect(self: *@This()) !void {
-        switch (self.host.scheme) {
-            .unix => try self.connectUnix(),
-            .tcp => try self.connectTcp(),
-        }
-    }
-
-    pub fn freeValue(self: @This(), value: *std.json.Value) void {
-        switch (value.*) {
-            .number_string, .string => |s| self.gpa.free(s),
-            .array => |*a| {
-                for (a.items) |*item| self.freeValue(item);
-                a.deinit();
-            },
-            .object => |*o| {
-                var it = o.iterator();
-                while (it.next()) |*entry| {
-                    self.gpa.free(entry.key_ptr.*);
-                    self.freeValue(entry.value_ptr);
+        fn connectTcp(self: *@This()) ConnectTcpError!void {
+            if (std.Io.net.IpAddress.parseIp4(self.host.name, self.host.port)) |addr| {
+                if (try self.http_client.connection_pool.findConnection(self.http_client.io, .{
+                    .host = .{ .bytes = self.host.name },
+                    .port = self.host.port,
+                    .protocol = .plain,
+                })) |conn| {
+                    self.connection = conn;
+                    return;
                 }
-                o.deinit(self.gpa);
-            },
-            else => {},
-        }
-    }
 
-    fn cloneValue(self: @This(), value: *const std.json.Value) !std.json.Value {
-        return switch (value.*) {
-            .null => .{ .null = {} },
-            .bool => |b| .{ .bool = b },
-            .integer => |i| .{ .integer = i },
-            .float => |f| .{ .float = f },
-            .number_string => |s| .{ .number_string = try self.gpa.dupe(u8, s) },
-            .string => |s| .{ .string = try self.gpa.dupe(u8, s) },
-            .array => |a| blk: {
-                var new_arr = std.json.Array.init(self.gpa);
-                for (a.items) |*item| try new_arr.append(try self.cloneValue(item));
-                break :blk .{ .array = new_arr };
-            },
-            .object => |o| blk: {
-                var new_obj: std.json.ObjectMap = .empty;
-                var it = o.iterator();
-                while (it.next()) |*entry| try new_obj.put(self.gpa, try self.gpa.dupe(u8, entry.key_ptr.*), try self.cloneValue(entry.value_ptr));
-                break :blk .{ .object = new_obj };
-            },
-        };
-    }
+                var stream = try addr.connect(self.http_client.io, .{ .mode = .stream });
+                errdefer stream.close(self.http_client.io);
 
-    fn verboseRequest(self: @This(), req: *const std.http.Client.Request) void {
-        if (!self.verbose) return;
-        std.log.debug("> {s} {s} {s}", .{
-            @tagName(req.method), req.uri.path.percent_encoded, @tagName(req.version),
-        });
-        std.log.debug("> Host: {s}", .{req.uri.host.?.percent_encoded});
-        const info = @typeInfo(@TypeOf(req.headers)).@"struct";
-        inline for (0..info.field_names.len) |i| {
-            if (info.field_types[i] == std.http.Client.Request.Headers.Value) {
-                switch (@field(req.headers, info.field_names[i])) {
-                    .override => |overriden| {
-                        var header_case_field_name: [info.field_names[i].len]u8 = undefined;
-                        @memcpy(&header_case_field_name, info.field_names[i]);
-                        toHeaderCase(&header_case_field_name);
-                        std.log.debug("> {s}: {s}", .{ header_case_field_name, overriden });
-                    },
-                    else => {},
-                }
+                const host_name = try std.Io.net.HostName.init(self.host.name);
+
+                const pc = try Plain.create(&self.http_client, host_name.bytes, self.host.port, stream);
+                errdefer pc.destroy();
+                try self.http_client.connection_pool.addUsed(self.http_client.io, &pc.connection);
+                self.connection = &pc.connection;
+            } else |_| {
+                self.connection = try self.http_client.connectTcp(try .init(self.host.name), self.host.port, .plain);
             }
         }
-        for (req.extra_headers) |header| std.log.debug("> {s}: {s}", .{ header.name, header.value });
-        for (req.privileged_headers) |header| std.log.debug("> {s}: {s}", .{ header.name, header.value });
-    }
 
-    fn verboseResponse(self: @This(), response: *const std.http.Client.Response) void {
-        if (!self.verbose) return;
-        var response_it = response.head.iterateHeaders();
-        std.log.debug("< HTTP {d} {s}", .{
-            @backingInt(response.head.status), @tagName(response.head.status),
-        });
-        while (response_it.next()) |header| {
-            std.log.debug("< {s}: {s}", .{ header.name, header.value });
+        const ConnectError = ConnectUnixError || ConnectTcpError;
+
+        fn connect(self: *@This()) ConnectError!void {
+            switch (self.host.scheme) {
+                .unix => try self.connectUnix(),
+                .tcp => try self.connectTcp(),
+            }
         }
-    }
 
-    fn sendInner(self: *@This(), sender: *const Sender.Interface, req_body: *std.json.Value) !void {
-        std.debug.assert(std.meta.activeTag(req_body.*) == .object);
-        std.debug.assert(req_body.object.getPtr("version") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("version").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("endpoint") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("endpoint").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("method") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("method").?.*) == .string);
-        std.debug.assert(std.meta.stringToEnum(std.http.Method, req_body.object.getPtr("method").?.string) != null);
+        fn verboseRequest(self: @This(), req: *const std.http.Client.Request) void {
+            if (!self.verbose) return;
+            Logger.debug(.{
+                .scope = .request,
+                .method = req.method,
+                .path = req.uri.path.percent_encoded,
+                .version = req.version,
+                .host = req.uri.host.?.percent_encoded,
+            });
+            const info = @typeInfo(@TypeOf(req.headers)).@"struct";
+            inline for (0..info.field_names.len) |i| {
+                if (info.field_types[i] == std.http.Client.Request.Headers.Value) {
+                    switch (@field(req.headers, info.field_names[i])) {
+                        .override => |overriden| {
+                            var header_case_field_name: [info.field_names[i].len]u8 = undefined;
+                            @memcpy(&header_case_field_name, info.field_names[i]);
+                            toHeaderCase(&header_case_field_name);
+                            Logger.debug(.{
+                                .scope = .request,
+                                .key = &header_case_field_name,
+                                .value = overriden,
+                            });
+                        },
+                        else => {},
+                    }
+                }
+            }
+            for (req.extra_headers) |header| Logger.debug(.{
+                .scope = .request,
+                .key = &header.name,
+                .value = header.value,
+            });
+            for (req.privileged_headers) |header| Logger.debug(.{
+                .scope = .request,
+                .key = &header.name,
+                .value = header.value,
+            });
+        }
 
-        // If a connection is initialized without being used later, deinitialization will panic
-        if (self.http_client.connection_pool.used.first == null) try self.connect();
+        fn verboseResponse(self: @This(), http_response: *const std.http.Client.Response) void {
+            if (!self.verbose) return;
+            var http_response_it = http_response.head.iterateHeaders();
+            Logger.debug(.{
+                .scope = .response,
+                .code = @backingInt(http_response.head.status),
+                .status = @tagName(http_response.head.status),
+            });
+            while (http_response_it.next()) |header| Logger.debug(.{
+                .scope = .response,
+                .key = &header.name,
+                .value = header.value,
+            });
+        }
 
-        var url: std.Io.Writer.Allocating = .init(self.gpa);
-        defer url.deinit();
+        const SendInnerError = std.Io.Cancelable || ConnectError || std.Io.Writer.Error || std.Uri.ParseError || std.http.Client.RequestError || std.mem.Allocator.Error || std.http.Client.Request.ReceiveHeadError || error{UnsupportedCompressionMethod} || error{WriteFailed} || Response.Interface.ProcessError;
 
-        try url.writer.writeAll("http://");
-        try url.writer.writeAll(req_body.object.getPtr("version").?.string);
-        try url.writer.writeAll(req_body.object.getPtr("endpoint").?.string);
+        fn sendInner(self: *@This(), response: *const Response.Interface, req_body: *const c.jv) SendInnerError!c.jv {
+            std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+            const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
+            defer c.jv_free(version_jv);
+            std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("endpoint")) == @intFromBool(true));
+            const endpoint_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("endpoint"));
+            defer c.jv_free(endpoint_jv);
+            std.debug.assert(c.jv_get_kind(endpoint_jv) == c.JV_KIND_STRING);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("method")) == @intFromBool(true));
+            const method_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("method"));
+            defer c.jv_free(method_jv);
+            std.debug.assert(c.jv_get_kind(method_jv) == c.JV_KIND_STRING);
+            const method = std.mem.span(c.jv_string_value(method_jv));
+            std.debug.assert(std.meta.stringToEnum(std.http.Method, method) != null);
 
-        if (req_body.object.getPtr("parameters")) |parameters| {
-            var it = parameters.object.iterator();
-            var is_first = true;
-            while (it.next()) |*entry| {
-                if (is_first) {
-                    try url.writer.writeAll("?");
-                    is_first = false;
-                } else try url.writer.writeAll("&");
+            try self.mutex.lock(self.http_client.io);
+            defer self.mutex.unlock(self.http_client.io);
 
-                try url.writer.writeAll(entry.key_ptr.*);
-                try url.writer.writeAll("=");
-                switch (entry.value_ptr.*) {
-                    .null => {},
-                    .bool => |b| try url.writer.writeAll(if (b) "true" else "false"),
-                    .integer => |i| try url.writer.print("{d}", .{i}),
-                    .float => |f| try url.writer.print("{d}", .{f}),
-                    .string => |s| try url.writer.writeAll(s),
+            // If a connection is initialized without being used later, deinitialization will panic
+            if (self.http_client.connection_pool.used.first == null) try self.connect();
+
+            var url: std.Io.Writer.Allocating = .init(self.gpa);
+            defer url.deinit();
+
+            try url.writer.writeAll("http://");
+            try url.writer.writeAll(std.mem.span(c.jv_string_value(version_jv)));
+            try url.writer.writeAll(std.mem.span(c.jv_string_value(endpoint_jv)));
+
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
+                const parameters = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters"));
+                defer c.jv_free(parameters);
+                var it = c.jv_object_iter(parameters);
+                var is_first = true;
+                var key: c.jv = undefined;
+                var value: c.jv = undefined;
+                while (c.jv_object_iter_valid(parameters, it) == @intFromBool(true)) {
+                    if (is_first) {
+                        try url.writer.writeAll("?");
+                        is_first = false;
+                    } else try url.writer.writeAll("&");
+
+                    key = c.jv_object_iter_key(parameters, it);
+                    defer c.jv_free(key);
+                    try url.writer.writeAll(std.mem.span(c.jv_string_value(key)));
+                    try url.writer.writeAll("=");
+                    value = c.jv_object_iter_value(parameters, it);
+                    defer c.jv_free(value);
+                    switch (c.jv_get_kind(value)) {
+                        c.JV_KIND_NULL => {},
+                        c.JV_KIND_FALSE => try url.writer.writeAll("false"),
+                        c.JV_KIND_TRUE => try url.writer.writeAll("true"),
+                        c.JV_KIND_NUMBER => if (c.jv_number_get_literal(c.jv_copy(value))) |lit| try url.writer.writeAll(std.mem.span(lit)) else try url.writer.print("{d}", .{c.jv_number_value(value)}),
+                        c.JV_KIND_STRING => try url.writer.writeAll(std.mem.span(c.jv_string_value(value))),
+                        else => unreachable,
+                    }
+                    it = c.jv_object_iter_next(parameters, it);
+                }
+            }
+
+            const uri = try std.Uri.parse(url.written());
+
+            var req = try self.http_client.request(std.meta.stringToEnum(std.http.Method, method).?, uri, .{
+                .connection = self.connection,
+                .headers = response.headers,
+            });
+            defer req.deinit();
+            self.verboseRequest(&req);
+
+            if (response.body.len > 0) try req.sendBodyComplete(response.body) else try req.sendBodiless();
+
+            const redirect_buffer: []u8 = try self.gpa.alloc(u8, 8 * 1024);
+            defer self.gpa.free(redirect_buffer);
+
+            var http_response = try req.receiveHead(redirect_buffer);
+            self.verboseResponse(&http_response);
+
+            var http_response_body: std.Io.Writer.Allocating = .init(self.gpa);
+            defer http_response_body.deinit();
+
+            const decompress_buffer: []u8 = switch (http_response.head.content_encoding) {
+                .identity => &.{},
+                .zstd => try self.gpa.alloc(u8, std.compress.zstd.default_window_len),
+                .deflate, .gzip => try self.gpa.alloc(u8, std.compress.flate.max_window_len),
+                .compress => return error.UnsupportedCompressionMethod,
+            };
+
+            var transfer_buffer: [64]u8 = undefined;
+            var decompress: std.http.Decompress = undefined;
+            const reader = http_response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+            var parsed: c.jv = undefined;
+            var output = c.jv_array();
+
+            while (true) {
+                _ = reader.streamDelimiter(&http_response_body.writer, '\n') catch |err| switch (err) {
+                    error.ReadFailed => return http_response.bodyErr().?,
+                    error.EndOfStream => break,
+                    error.WriteFailed => return error.WriteFailed,
+                };
+                _ = reader.toss(1);
+
+                const written = try http_response_body.toOwnedSliceSentinel(0);
+                defer self.gpa.free(written);
+                parsed = c.jv_parse(written.ptr);
+                defer c.jv_free(parsed);
+
+                try response.process(&output, &parsed);
+
+                http_response_body.clearRetainingCapacity();
+            }
+
+            return output;
+        }
+
+        pub fn send(self: *@This(), req_body: *const c.jv) SendError!c.jv {
+            var default_impl: Response.Impl.Default = .{};
+            const response = default_impl.response();
+            return self.sendInner(&response, req_body);
+        }
+
+        const WriteCtxArchiveError = error{ NameTooLong, OctalOverflow, WriteFailed } || std.Io.Dir.OpenError || std.mem.Allocator.Error || std.Io.Dir.SelectiveWalker.Error || std.Io.File.OpenError || std.Io.Reader.StreamError;
+
+        fn writeCtxArchive(self: @This(), writer: *std.Io.Writer, ctx: []const u8) WriteCtxArchiveError!void {
+            var archive: std.tar.Writer = .{ .underlying_writer = writer };
+
+            try archive.writeDir(".", .{});
+
+            const cwd = std.Io.Dir.cwd();
+            var dir = try cwd.openDir(self.http_client.io, ctx, .{ .iterate = true });
+            defer dir.close(self.http_client.io);
+
+            var walker = try dir.walk(self.gpa);
+            defer walker.deinit();
+            var file: std.Io.File = undefined;
+            var read_buf: [1024]u8 = undefined;
+            var file_reader: std.Io.File.Reader = undefined;
+            var file_content: std.Io.Writer.Allocating = undefined;
+
+            while (try walker.next(self.http_client.io)) |entry| {
+                const full_path = try std.fs.path.resolveAlloc(self.gpa, &[_][]const u8{ ctx, entry.path });
+                defer self.gpa.free(full_path);
+
+                switch (entry.kind) {
+                    .directory => try archive.writeDir(entry.path, .{}),
+                    .file => {
+                        file = try cwd.openFile(self.http_client.io, full_path, .{ .mode = .read_only });
+                        defer file.close(self.http_client.io);
+
+                        file_reader = file.reader(self.http_client.io, &read_buf);
+                        file_content = .init(self.gpa);
+                        defer file_content.deinit();
+
+                        _ = try file_reader.interface.stream(&file_content.writer, .unlimited);
+
+                        try archive.writeFileBytes(entry.path, file_content.written(), .{});
+                    },
                     else => unreachable,
                 }
             }
         }
 
-        const uri = try std.Uri.parse(url.written());
+        pub fn sendBuild(self: *@This(), req_body: *const c.jv) SendBuildError!c.jv {
+            std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("ctx")) == @intFromBool(true));
+            const ctx_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("ctx"));
+            defer c.jv_free(ctx_jv);
+            std.debug.assert(c.jv_get_kind(ctx_jv) == c.JV_KIND_STRING);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+            const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
+            defer c.jv_free(version_jv);
+            std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
+            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("t")) == @intFromBool(true));
+            const t_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("t"));
+            defer c.jv_free(t_jv);
+            std.debug.assert(c.jv_get_kind(t_jv) == c.JV_KIND_STRING);
+            const cwd = std.Io.Dir.cwd();
+            const ctx = std.mem.span(c.jv_string_value(ctx_jv));
+            const stat = try cwd.statFile(self.http_client.io, ctx, .{});
+            std.debug.assert(stat.kind == .directory);
 
-        var req = try self.http_client.request(std.meta.stringToEnum(std.http.Method, req_body.object.getPtr("method").?.string).?, uri, .{
-            .connection = self.connection,
-            .headers = sender.headers,
-        });
-        defer req.deinit();
-        self.verboseRequest(&req);
+            var archive_buf: std.Io.Writer.Allocating = .init(self.gpa);
+            defer archive_buf.deinit();
 
-        if (sender.body.len > 0) try req.sendBodyComplete(sender.body) else try req.sendBodiless();
+            try self.writeCtxArchive(&archive_buf.writer, ctx);
 
-        const redirect_buffer: []u8 = try self.gpa.alloc(u8, 8 * 1024);
-        defer self.gpa.free(redirect_buffer);
-
-        var response = try req.receiveHead(redirect_buffer);
-        self.verboseResponse(&response);
-
-        var response_body: std.Io.Writer.Allocating = .init(self.gpa);
-        defer response_body.deinit();
-
-        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
-            .identity => &.{},
-            .zstd => try self.gpa.alloc(u8, std.compress.zstd.default_window_len),
-            .deflate, .gzip => try self.gpa.alloc(u8, std.compress.flate.max_window_len),
-            .compress => return error.UnsupportedCompressionMethod,
-        };
-
-        var transfer_buffer: [64]u8 = undefined;
-        var decompress: std.http.Decompress = undefined;
-        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-
-        var scanner: std.json.Scanner = undefined;
-        var diag: std.json.Diagnostics = .{};
-        var parsed: std.json.Value = undefined;
-
-        while (true) {
-            _ = reader.streamDelimiter(&response_body.writer, '\n') catch |err| switch (err) {
-                error.ReadFailed => return response.bodyErr().?,
-                error.EndOfStream => break,
-                else => return err,
-            };
-            _ = reader.toss(1);
-
-            const written = response_body.written();
-            scanner = std.json.Scanner.initCompleteInput(self.gpa, written);
-            defer scanner.deinit();
-
-            scanner.enableDiagnostics(&diag);
-
-            parsed = std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
-                .ignore_unknown_fields = true,
-            }) catch |err| {
-                std.log.err("{s}: line {}, column {}", .{ written, diag.getLine(), diag.getColumn() });
-                return err;
-            };
-
-            try sender.processJSON(&parsed);
-
-            response_body.clearRetainingCapacity();
-        }
-    }
-
-    pub fn send(self: *@This(), writer: *std.Io.Writer, req_body: *std.json.Value) !void {
-        var default_impl: Sender.Impl.Default = .{
-            .writer = writer,
-        };
-        const sender = default_impl.sender();
-        try self.sendInner(&sender, req_body);
-    }
-
-    fn writeCtxArchive(self: @This(), writer: *std.Io.Writer, req_body: *std.json.Value) !void {
-        var archive: std.tar.Writer = .{ .underlying_writer = writer };
-
-        try archive.writeDir(".", .{});
-
-        var dir = try std.Io.Dir.cwd().openDir(self.http_client.io, req_body.object.getPtr("ctx").?.string, .{ .iterate = true });
-        defer dir.close(self.http_client.io);
-
-        var walker = try dir.walk(self.gpa);
-        defer walker.deinit();
-        var file: std.Io.File = undefined;
-        var read_buf: [1024]u8 = undefined;
-        var file_reader: std.Io.File.Reader = undefined;
-        var file_content: std.Io.Writer.Allocating = undefined;
-
-        while (try walker.next(self.http_client.io)) |entry| {
-            const full_path = try std.fs.path.join(self.gpa, &[_][]const u8{ req_body.object.getPtr("ctx").?.string, entry.path });
-            defer self.gpa.free(full_path);
-
-            switch (entry.kind) {
-                .directory => try archive.writeDir(entry.path, .{}),
-                .file => {
-                    file = try std.Io.Dir.cwd().openFile(self.http_client.io, full_path, .{ .mode = .read_only });
-                    defer file.close(self.http_client.io);
-
-                    file_reader = file.reader(self.http_client.io, &read_buf);
-                    file_content = .init(self.gpa);
-                    defer file_content.deinit();
-
-                    _ = try file_reader.interface.stream(&file_content.writer, .unlimited);
-
-                    try archive.writeFileBytes(entry.path, file_content.written(), .{});
-                },
-                else => unreachable,
+            var parameters_jv = c.jv_object();
+            errdefer c.jv_free(parameters_jv);
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
+                parameters_jv = c.jv_object_merge(parameters_jv, c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters")));
             }
-        }
-    }
+            parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("version"), c.jv_number(2));
+            parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("t"), c.jv_copy(t_jv));
+            var req_body_jv = c.jv_object();
+            defer c.jv_free(req_body_jv);
+            req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("version"), c.jv_copy(version_jv));
+            req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("endpoint"), c.jv_string("/build"));
+            req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("method"), c.jv_string("POST"));
+            req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("parameters"), parameters_jv);
 
-    pub fn sendBuild(self: *@This(), req_body: *std.json.Value) !void {
-        std.debug.assert(std.meta.activeTag(req_body.*) == .object);
-        std.debug.assert(req_body.object.getPtr("ctx") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("ctx").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("version") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("version").?.*) == .string);
-        const cwd = std.Io.Dir.cwd();
-        const stat = try cwd.statFile(self.http_client.io, req_body.object.getPtr("ctx").?.string, .{});
-        std.debug.assert(stat.kind == .directory);
-        std.debug.assert(req_body.object.getPtr("t") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("t").?.*) == .string);
-
-        var archive_buf: std.Io.Writer.Allocating = .init(self.gpa);
-        defer archive_buf.deinit();
-
-        try self.writeCtxArchive(&archive_buf.writer, req_body);
-
-        var json: std.json.Value = .{ .object = .empty };
-        defer json.object.deinit(self.gpa);
-        try json.object.put(self.gpa, "version", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("version").?.string) });
-        defer self.gpa.free(json.object.getPtr("version").?.string);
-        try json.object.put(self.gpa, "endpoint", .{ .string = "/build" });
-        try json.object.put(self.gpa, "method", .{ .string = "POST" });
-
-        try json.object.put(self.gpa, "parameters", try self.cloneValue(req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
-        defer self.freeValue(json.object.getPtr("parameters").?);
-
-        try json.object.getPtr("parameters").?.object.put(self.gpa, "version", .{ .integer = 2 });
-        defer _ = json.object.getPtr("parameters").?.object.swapRemove("version");
-        try json.object.getPtr("parameters").?.object.put(self.gpa, "t", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("t").?.string) });
-        defer {
-            self.gpa.free(json.object.getPtr("parameters").?.object.getPtr("t").?.string);
-            _ = json.object.getPtr("parameters").?.object.swapRemove("t");
-        }
-
-        var build_impl: Sender.Impl.Build = .{
-            .arena = self.arena,
-        };
-        const sender = build_impl.sender(&archive_buf);
-        try self.sendInner(&sender, &json);
-    }
-
-    const Sender = struct {
-        const Interface = struct {
-            const VTable = struct {
-                process_json_fn: *const fn (*anyopaque, *const std.json.Value) anyerror!void,
+            var build_impl: Response.Impl.Build = .{
+                .arena = self.arena,
             };
+            const response = build_impl.response(&archive_buf);
+            return self.sendInner(&response, &req_body_jv);
+        }
 
-            ptr: *anyopaque,
-            vtable: *const VTable,
-            body: []u8 = "",
-            headers: std.http.Client.Request.Headers,
+        const Response = struct {
+            const Interface = struct {
+                const VTable = struct {
+                    process_fn: *const fn (*anyopaque, *c.jv, *const c.jv) ProcessError!void,
+                };
 
-            fn processJSON(self: @This(), parsed: *const std.json.Value) !void {
-                try self.vtable.process_json_fn(self.ptr, parsed);
-            }
-        };
+                ptr: *anyopaque,
+                vtable: *const VTable,
+                body: []u8 = "",
+                headers: std.http.Client.Request.Headers,
 
-        const Impl = struct {
-            const Default = struct {
-                writer: *std.Io.Writer,
+                const ProcessError = protobuf.DecodingError || std.Io.Reader.Error || std.mem.Allocator.Error || std.base64.Error || error{ BuildkitFailure, DockerBuildEndpointFailure };
 
-                fn processJSON(ptr: *anyopaque, parsed: *const std.json.Value) !void {
-                    const self: *@This() = @ptrCast(@alignCast(ptr));
-                    try std.json.Stringify.value(parsed.*, .{}, self.writer);
+                fn process(self: @This(), output: *c.jv, parsed: *const c.jv) ProcessError!void {
+                    std.debug.assert(c.jv_get_kind(output.*) == c.JV_KIND_ARRAY);
+                    try self.vtable.process_fn(self.ptr, output, parsed);
                 }
+            };
 
-                fn sender(self: *@This()) Client.Sender.Interface {
-                    return .{
-                        .ptr = self,
-                        .vtable = &.{
-                            .process_json_fn = @This().processJSON,
-                        },
-                        .headers = .{
-                            .user_agent = .{
-                                .override = user_agent,
+            const Impl = struct {
+                const Default = struct {
+                    fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) Interface.ProcessError!void {
+                        const self: *@This() = @ptrCast(@alignCast(ptr));
+                        _ = self;
+                        output.* = c.jv_array_append(output.*, c.jv_copy(parsed.*));
+                    }
+
+                    fn response(self: *@This()) Response.Interface {
+                        return .{
+                            .ptr = self,
+                            .vtable = &.{
+                                .process_fn = @This().process,
                             },
-                        },
-                    };
-                }
-            };
+                            .headers = .{
+                                .user_agent = .{
+                                    .override = user_agent,
+                                },
+                            },
+                        };
+                    }
+                };
 
-            const Build = struct {
-                arena: std.mem.Allocator,
-                b64_buffer: [1024]u8 = undefined,
-                proto_reader: std.Io.Reader = undefined,
-                status_resp: buildkit.StatusResponse = undefined,
+                const Build = struct {
+                    arena: std.mem.Allocator,
+                    b64_buffer: [1024]u8 = undefined,
+                    proto_reader: std.Io.Reader = undefined,
+                    status_resp: buildkit.StatusResponse = undefined,
 
-                fn processJSON(ptr: *anyopaque, parsed: *const std.json.Value) !void {
-                    const self: *@This() = @ptrCast(@alignCast(ptr));
+                    fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) Interface.ProcessError!void {
+                        _ = output;
+                        const self: *@This() = @ptrCast(@alignCast(ptr));
 
-                    if (parsed.object.get("id")) |id| {
-                        if (std.mem.eql(u8, id.string, "moby.buildkit.trace")) {
-                            const b64_encoded = parsed.object.get("aux").?;
-                            const decoded = self.b64_buffer[0..try std.base64.standard.Decoder.calcSizeForSlice(b64_encoded.string)];
-                            try std.base64.standard.Decoder.decode(decoded, b64_encoded.string);
-                            self.proto_reader = .fixed(decoded);
-                            self.status_resp = try buildkit.StatusResponse.decode(&self.proto_reader, self.arena);
-                            if (self.status_resp.vertexes.items.len > 0) {
-                                for (self.status_resp.vertexes.items) |v| {
-                                    if (v.@"error".len > 0) {
-                                        std.debug.print("[ERROR] {s}\n", .{trim(v.@"error")});
-                                        return error.BuildkitError;
-                                    } else if (v.started != null and v.completed != null) std.debug.print("{s}\n", .{trim(v.name)});
-                                }
-                            } else if (self.status_resp.statuses.items.len > 0) {
-                                for (self.status_resp.statuses.items) |s| {
-                                    if (s.started != null and s.completed != null) std.debug.print("{s}\n", .{trim(s.ID)});
-                                }
-                            } else if (self.status_resp.logs.items.len > 0) {
-                                for (self.status_resp.logs.items) |l| std.debug.print("{s}\n", .{trim(l.msg)});
-                            } else if (self.status_resp.warnings.items.len > 0) {
-                                for (self.status_resp.warnings.items) |w| std.debug.print("{s}\n", .{trim(w.short)});
+                        if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("id")) == @intFromBool(true)) {
+                            const id_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("id"));
+                            defer c.jv_free(id_jv);
+                            const id = std.mem.span(c.jv_string_value(id_jv));
+                            if (std.mem.eql(u8, id, "moby.buildkit.trace")) {
+                                const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
+                                defer c.jv_free(aux_jv);
+                                const b64_encoded = std.mem.span(c.jv_string_value(aux_jv));
+                                const decoded = self.b64_buffer[0..try std.base64.standard.Decoder.calcSizeForSlice(b64_encoded)];
+                                try std.base64.standard.Decoder.decode(decoded, b64_encoded);
+                                self.proto_reader = .fixed(decoded);
+                                self.status_resp = try buildkit.StatusResponse.decode(&self.proto_reader, self.arena);
+                                if (self.status_resp.vertexes.items.len > 0) {
+                                    for (self.status_resp.vertexes.items) |v| {
+                                        if (v.@"error".len > 0) {
+                                            const e = error.BuildkitFailure;
+                                            Logger.err(e, trim(v.@"error"), .{});
+                                            return e;
+                                        } else if (v.started != null and v.completed != null) Logger.debug(.{ .buildkit_vertex = trim(v.name) });
+                                    }
+                                } else if (self.status_resp.statuses.items.len > 0) {
+                                    for (self.status_resp.statuses.items) |s| {
+                                        if (s.started != null and s.completed != null) Logger.debug(.{ .buildkit_status = trim(s.ID) });
+                                    }
+                                } else if (self.status_resp.logs.items.len > 0) {
+                                    for (self.status_resp.logs.items) |l| Logger.debug(.{ .buildkit_log = trim(l.msg) });
+                                } else if (self.status_resp.warnings.items.len > 0) {
+                                    for (self.status_resp.warnings.items) |w| Logger.warn(trim(w.short), .{});
+                                } else unreachable;
+                            } else if (std.mem.eql(u8, id, "moby.image.id")) {
+                                const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
+                                defer c.jv_free(aux_jv);
+                                const image_id_jv = c.jv_object_get(c.jv_copy(aux_jv), c.jv_string("ID"));
+                                defer c.jv_free(image_id_jv);
+                                Logger.debug(.{ .image_id = std.mem.span(c.jv_string_value(image_id_jv)) });
                             } else unreachable;
-                        } else if (std.mem.eql(u8, id.string, "moby.image.id")) {
-                            std.debug.print("Image ID: {s}\n", .{parsed.object.get("aux").?.object.get("ID").?.string});
+                        } else if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("errorDetail")) == @intFromBool(true)) {
+                            const error_detail_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("errorDetail"));
+                            defer c.jv_free(error_detail_jv);
+                            const message_jv = c.jv_object_get(c.jv_copy(error_detail_jv), c.jv_string("message"));
+                            defer c.jv_free(message_jv);
+                            const e = error.DockerBuildEndpointFailure;
+                            Logger.err(e, std.mem.span(c.jv_string_value(message_jv)), .{});
+                            return e;
                         } else unreachable;
-                    } else if (parsed.object.get("errorDetail")) |err| {
-                        std.log.err("{s}", .{err.object.get("message").?.string});
-                        return error.DockerBuild;
-                    } else unreachable;
-                }
+                    }
 
-                fn sender(self: *@This(), w: *std.Io.Writer.Allocating) Client.Sender.Interface {
-                    return .{
-                        .ptr = self,
-                        .vtable = &.{
-                            .process_json_fn = @This().processJSON,
-                        },
-                        .body = w.written(),
-                        .headers = .{
-                            .user_agent = .{
-                                .override = user_agent,
+                    fn response(self: *@This(), w: *std.Io.Writer.Allocating) Response.Interface {
+                        return .{
+                            .ptr = self,
+                            .vtable = &.{
+                                .process_fn = @This().process,
                             },
-                            .content_type = .{
-                                .override = "application/x-tar",
+                            .body = w.written(),
+                            .headers = .{
+                                .user_agent = .{
+                                    .override = user_agent,
+                                },
+                                .content_type = .{
+                                    .override = "application/x-tar",
+                                },
                             },
-                        },
-                    };
-                }
+                        };
+                    }
+                };
             };
         };
     };
-};
+}

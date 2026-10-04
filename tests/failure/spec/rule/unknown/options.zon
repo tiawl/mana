@@ -1,0 +1,6 @@
+.{
+    .args = .{
+        "unknown-rule",
+    },
+    .err = "UnknownRule",
+}

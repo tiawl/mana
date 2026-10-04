@@ -1,0 +1,5 @@
+.{
+    .@"get-platform" = .{
+        .@"docker/docker_version" = "It should fail because of this string",
+    },
+}
