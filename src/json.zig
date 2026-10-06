@@ -19,7 +19,7 @@ pub fn freeValue(gpa: std.mem.Allocator, value: *std.json.Value) void {
     }
 }
 
-pub fn cloneValue(gpa: std.mem.Allocator, value: *const std.json.Value) !std.json.Value {
+pub fn dupeValue(gpa: std.mem.Allocator, value: *const std.json.Value) !std.json.Value {
     return switch (value.*) {
         .null => .{ .null = {} },
         .bool => |b| .{ .bool = b },
@@ -29,13 +29,13 @@ pub fn cloneValue(gpa: std.mem.Allocator, value: *const std.json.Value) !std.jso
         .string => |s| .{ .string = try gpa.dupe(u8, s) },
         .array => |a| blk: {
             var new_arr = std.json.Array.init(gpa);
-            for (a.items) |*item| try new_arr.append(try cloneValue(gpa, item));
+            for (a.items) |*item| try new_arr.append(try dupeValue(gpa, item));
             break :blk .{ .array = new_arr };
         },
         .object => |o| blk: {
             var new_obj: std.json.ObjectMap = .empty;
             var it = o.iterator();
-            while (it.next()) |*entry| try new_obj.put(gpa, try gpa.dupe(u8, entry.key_ptr.*), try cloneValue(gpa, entry.value_ptr));
+            while (it.next()) |*entry| try new_obj.put(gpa, try gpa.dupe(u8, entry.key_ptr.*), try dupeValue(gpa, entry.value_ptr));
             break :blk .{ .object = new_obj };
         },
     };

@@ -421,7 +421,7 @@ pub const Client = struct {
         try req_body_json.object.put(self.gpa, "endpoint", .{ .string = "/build" });
         try req_body_json.object.put(self.gpa, "method", .{ .string = "POST" });
 
-        try req_body_json.object.put(self.gpa, "parameters", try json.cloneValue(self.gpa, req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
+        try req_body_json.object.put(self.gpa, "parameters", try json.dupeValue(self.gpa, req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
         defer json.freeValue(self.gpa, req_body_json.object.getPtr("parameters").?);
 
         try req_body_json.object.getPtr("parameters").?.object.put(self.gpa, "version", .{ .integer = 2 });
@@ -461,7 +461,7 @@ pub const Client = struct {
                 fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) !void {
                     const self: *@This() = @ptrCast(@alignCast(ptr));
                     _ = self;
-                    try output.array.append(try json.cloneValue(output.array.allocator, parsed));
+                    try output.array.append(try json.dupeValue(output.array.allocator, parsed));
                 }
 
                 fn response(self: *@This()) Client.Response.Interface {

@@ -158,6 +158,17 @@ fn buildFrontendModule(builder: *std.Build, mana_mod: *std.Build.Module) *std.Bu
     });
 }
 
+fn buildMainModule(builder: *std.Build, frontend_mod: *std.Build.Module) *std.Build.Module {
+    return builder.createModule(.{
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "main.zig" })),
+        .target = builder.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "frontend", .module = frontend_mod },
+        },
+    });
+}
+
 fn buildManaExecutable(builder: *std.Build) void {
     const options_mod = buildOptionsModule(builder);
     const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder);
@@ -165,10 +176,11 @@ fn buildManaExecutable(builder: *std.Build) void {
     const docker_mod = buildDockerModule(builder, options_mod, buildkit_mod, json_mod);
     const mana_mod = buildManaModule(builder, docker_mod, json_mod);
     const frontend_mod = buildFrontendModule(builder, mana_mod);
+    const main_mod = buildMainModule(builder, frontend_mod);
 
     var mana_exe = builder.addExecutable(.{
         .name = "mana",
-        .root_module = frontend_mod,
+        .root_module = main_mod,
     });
 
     mana_exe.step.dependOn(protobuf_compiler.step);

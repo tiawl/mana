@@ -12,7 +12,7 @@ pub fn deinit() void {
     mana.deinit();
 }
 
-pub fn processJSON(comptime Impl: type, inputs: []const std.json.Value) !std.json.Value {
+pub fn processJSON(comptime Impl: type, inputs: std.json.Value) !std.json.Value {
     return mana.processJSON(Impl, inputs);
 }
 
@@ -36,11 +36,6 @@ pub fn free(allocator: std.mem.Allocator, mem: *std.json.Value) void {
     json.freeValue(allocator, mem);
 }
 
-// TODO:
-//pub fn schedule(unknown_typed: anytype) !void {
-//    return mana.schedule(unknown_typed);
-//}
-
 const docker_api_version = "v1.56";
 
 const DockerEndpoint = enum(u32) {
@@ -53,18 +48,11 @@ const DockerEndpoint = enum(u32) {
     }
 };
 
-//const Module = enum(u32) {
-//    json_processor,
-//    docker_requester,
-//    docker_build_requester,
-//    dynlib_compiler,
-//};
-
 const JSONProcessor = struct {
     const VTable = struct {
         init_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
         deinit_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
-        process_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io, []const std.json.Value) std.json.Value,
+        process_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io, std.json.Value) std.json.Value,
     };
 
     ptr: *anyopaque,
@@ -95,7 +83,8 @@ const JSONProcessor = struct {
         self.vtable.deinit_fn(self.ptr, self.allocator, self.io);
     }
 
-    pub fn process(self: *@This(), inputs: []const std.json.Value) std.json.Value {
+    pub fn process(self: *@This(), inputs: std.json.Value) std.json.Value {
+        std.debug.assert(std.meta.activeTag(inputs) == .array);
         return self.vtable.process_fn(self.ptr, self.allocator, self.io, inputs);
     }
 };
@@ -117,7 +106,7 @@ const Mana = struct {
         self.docker_client.deinit();
     }
 
-    fn processJSON(self: *@This(), comptime Impl: type, inputs: []const std.json.Value) !std.json.Value {
+    fn processJSON(self: *@This(), comptime Impl: type, inputs: std.json.Value) !std.json.Value {
         var impl_instance: Impl = undefined;
         var json_processor: JSONProcessor = .implement(Impl, &impl_instance);
         json_processor.init(self.gpa, self.io);
@@ -130,9 +119,9 @@ const Mana = struct {
         std.debug.assert(std.meta.activeTag(input) == .object);
 
         if (input.object.getPtr("docker")) |req_body| {
-            return try self.docker_client.send(allocator, req_body);
+            return self.docker_client.send(allocator, req_body);
         } else if (input.object.getPtr("docker_build")) |req_body| {
-            return try self.docker_client.sendBuild(allocator, req_body);
+            return self.docker_client.sendBuild(allocator, req_body);
         } else unreachable;
     }
 
@@ -174,66 +163,4 @@ const Mana = struct {
             },
         });
     }
-
-    //fn schedule(self: *@This(), unknown_typed: anytype) !void {
-    //    switch (@typeInfo(@TypeOf(unknown_typed))) {
-    //        .@"struct" => try self.scheduleInner(unknown_typed),
-    //        else => {
-    //            std.log.err("schedule() only accept struct typed input");
-    //            return error.UnsupportedInput;
-    //        },
-    //    }
-    //}
-
-    //fn scheduleInner(self: *@This(), input: anytype) !void {
-    //    std.debug.assert(std.meta.activeTag(@typeInfo(@TypeOf(input))) == .@"struct");
-
-    //    const source = self.builder.fmt("{f}", .{std.json.fmt(input, .{})});
-
-    //    var diag: std.json.Diagnostics = .{};
-    //    var scanner = std.json.Scanner.initCompleteInput(self.builder.graph.arena, source);
-
-    //    scanner.enableDiagnostics(&diag);
-
-    //    const parsed = std.json.parseFromTokenSourceLeaky(std.json.Value, self.builder.graph.arena, &scanner, .{
-    //        .ignore_unknown_fields = true,
-    //    }) catch |err| {
-    //        std.log.err("{s}: line {}, column {}", .{ source, diag.getLine(), diag.getColumn() });
-    //        return err;
-    //    };
-
-    //    var ids: std.StringHashMap([]const u8) = .init(self.builder.graph.arena);
-
-    //    var it = parsed.object.iterator();
-    //    while (it.next()) |*task| {
-    //        const id = task.key_ptr.*;
-    //        if (std.mem.findScalar(u8, id, '/') == null) {
-    //            std.log.err("A valid id must contain at least a slash caracter right after module kind: {s}", .{id});
-    //            return error.InvalidId;
-    //        }
-    //        ids.put(self.builder.graph.dupeString(id), undefined) catch @panic("OOM");
-    //    }
-
-    //    it.reset();
-    //    while (it.next()) |*task| {
-    //        const id = task.key_ptr.*;
-    //        const module_str, _ = std.mem.cutScalar(u8, id, '/').?;
-    //        const module = std.meta.stringToEnum(Module, module_str) orelse {
-    //            std.log.err(
-    //                \\A valid module is one of these values {f} but yours is: "{s}"
-    //            , .{ std.json.fmt(@typeInfo(Module).@"enum".field_names, .{}), module_str });
-    //            return error.InvalidModule;
-    //        };
-    //        switch (task.value_ptr.*) {
-    //            .object => {},
-    //            else => {
-    //                std.log.err(
-    //                    \\"{s}" task isn't struct typed
-    //                , .{id});
-    //                return error.InvalidInput;
-    //            },
-    //        }
-    //        _ = module;
-    //    }
-    //}
 };
