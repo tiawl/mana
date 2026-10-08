@@ -1,7 +1,30 @@
 const std = @import("std");
 const mana = @import("mana");
 
-pub fn JSONProcessorTask(comptime Impl: type) type {
+var singleton: Scheduler = undefined;
+
+pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
+    singleton.init(arena, gpa, io, environ);
+}
+
+pub fn deinit() void {
+    singleton.deinit();
+}
+
+pub fn addJSONProcessTask(comptime Impl: type, key: []const u8, inputs: []const []const u8) !void {
+    try singleton.addJSONProcessTask(Impl, key, inputs);
+}
+
+pub fn addRequestTask(key: []const u8, input: std.json.Value, dependencies: []const []const u8) !void {
+    try singleton.addRequestTask(key, input, dependencies);
+}
+
+pub fn run() !void {
+    try singleton.run();
+}
+
+// TODO: It should take std.Io.Group for potential async loops
+fn JSONProcessTask(comptime Impl: type) type {
     return struct {
         arena: std.mem.Allocator,
         gpa: std.mem.Allocator,
@@ -64,7 +87,7 @@ pub fn JSONProcessorTask(comptime Impl: type) type {
     };
 }
 
-pub const RequestTask = struct {
+const RequestTask = struct {
     gpa: std.mem.Allocator,
     input: std.json.Value,
     output: std.json.Value,
@@ -99,7 +122,7 @@ pub const RequestTask = struct {
     }
 };
 
-const RootTask = struct {
+const InitTask = struct {
     pub fn init(ptr: *anyopaque, arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io) void {
         _ = .{ ptr, arena, gpa, io };
     }
@@ -126,7 +149,7 @@ const RootTask = struct {
     }
 };
 
-pub const Task = struct {
+const Task = struct {
     const VTable = struct {
         init_fn: *const fn (*anyopaque, *std.heap.ArenaAllocator, std.mem.Allocator, std.Io) void,
         deinit_fn: *const fn (*anyopaque) void,
@@ -182,15 +205,12 @@ pub const Task = struct {
         self.parents.deinit(self.gpa);
     }
 
-    pub fn dependOn(self: *@This(), comptime Child: type, child_instance: *Child) !*@This() {
-        std.debug.assert(@hasDecl(Child, "task"));
+    pub fn dependOn(self: *@This(), child: *@This()) !void {
         try self.children.append(self.gpa, try self.gpa.create(@This()));
-        var child = self.children.last().?;
-        child.* = child_instance.task();
-        child.init(self.arena, self.gpa, self.io);
-        try child.parents.append(self.gpa, self);
-        try self.vtable.depend_on_fn(self.ptr, child);
-        return child;
+        self.children.last().?.* = child.*;
+        self.children.last().?.init(self.arena, self.gpa, self.io);
+        try self.children.last().?.parents.append(self.gpa, self);
+        try self.vtable.depend_on_fn(self.ptr, self.children.last().?);
     }
 
     pub fn getOutput(self: *const @This()) ?*const std.json.Value {
@@ -225,7 +245,7 @@ pub const Task = struct {
         self.pending = .init(self.children.items.len);
         self.ready = .unset;
 
-        group.async(self.io, run, .{self});
+        group.async(self.io, @This().run, .{self});
         for (self.children.items) |child| child.spawn(group);
     }
 
@@ -243,9 +263,10 @@ pub const Task = struct {
     }
 };
 
-pub const Scheduler = struct {
-    root_instance: RootTask,
-    root_task: Task,
+const Scheduler = struct {
+    init_instance: InitTask,
+    init_task: Task,
+    tasks: std.StringHashMap(*Task),
     arena: *std.heap.ArenaAllocator,
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -256,27 +277,54 @@ pub const Scheduler = struct {
         self.arena = arena;
         self.gpa = gpa;
         self.io = io;
-        self.root_instance = .{};
-        self.root_task = self.root_instance.task();
-        self.root_task.init(self.arena, self.gpa, self.io);
+        self.init_instance = .{};
+        self.init_task = self.init_instance.task();
+        self.init_task.init(self.arena, self.gpa, self.io);
+        self.tasks = .init(self.gpa);
     }
 
     pub fn deinit(self: *@This()) void {
-        self.root_task.deinit();
+        self.init_task.deinit();
+        var it = self.tasks.iterator();
+        while (it.next()) |*entry| self.gpa.free(entry.key_ptr.*);
+        self.tasks.deinit();
         mana.deinit();
     }
 
-    pub fn addTask() void {
-        // TODO
+    // TODO: hash the key
+    fn addTask(self: *@This(), comptime TaskImpl: type, key: []const u8, instance: *TaskImpl, dependencies: []const []const u8) !void {
+        var task = instance.task();
+        try self.init_task.dependOn(&task);
+        try self.tasks.put(try self.gpa.dupe(u8, key), &task);
+        for (dependencies) |dep_key| {
+            try self.tasks.get(key).?.dependOn(self.tasks.get(dep_key).?);
+        }
+    }
+
+    pub fn addJSONProcessTask(self: *@This(), comptime Impl: type, key: []const u8, inputs: []const []const u8) !void {
+        const instance = try self.arena.allocator().create(JSONProcessTask(Impl));
+
+        try self.addTask(JSONProcessTask(Impl), key, instance, inputs);
+    }
+
+    pub fn addRequestTask(self: *@This(), key: []const u8, input: std.json.Value, dependencies: []const []const u8) !void {
+        const instance = try self.arena.allocator().create(RequestTask);
+        instance.* = .{
+            .gpa = undefined,
+            .input = input,
+            .output = undefined,
+        };
+
+        try self.addTask(RequestTask, key, instance, dependencies);
     }
 
     pub fn run(self: *@This()) !void {
-        if (!try self.root_task.isAcyclic()) return error.DependencyLoopDetected;
+        if (!try self.init_task.isAcyclic()) return error.DependencyLoopDetected;
 
         self.group = .init;
         defer self.group.cancel(self.io);
 
-        self.root_task.spawn(&self.group);
+        self.init_task.spawn(&self.group);
         try self.group.await(self.io);
     }
 };

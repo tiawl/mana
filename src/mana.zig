@@ -2,34 +2,34 @@ const std = @import("std");
 const docker = @import("docker");
 const json = @import("json");
 
-var mana: Mana = undefined;
+var singleton: Mana = undefined;
 
 pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
-    mana.init(arena, gpa, io, environ);
+    singleton.init(arena, gpa, io, environ);
 }
 
 pub fn deinit() void {
-    mana.deinit();
+    singleton.deinit();
 }
 
 pub fn processJSON(comptime Impl: type, inputs: std.json.Value) !std.json.Value {
-    return mana.processJSON(Impl, inputs);
+    return singleton.processJSON(Impl, inputs);
 }
 
 pub fn sendRequestValue(allocator: std.mem.Allocator, input: std.json.Value) !std.json.Value {
-    return mana.sendRequestValue(allocator, input);
+    return singleton.sendRequestValue(allocator, input);
 }
 
 pub fn sendRequestAny(allocator: std.mem.Allocator, input: anytype) !std.json.Value {
-    return mana.sendRequestAny(allocator, input);
+    return singleton.sendRequestAny(allocator, input);
 }
 
 pub fn sendDockerDefaultRequest(allocator: std.mem.Allocator, endpoint: DockerEndpoint, method: std.http.Method, parameters: anytype) !std.json.Value {
-    return mana.sendDockerDefaultRequest(allocator, endpoint, method, parameters);
+    return singleton.sendDockerDefaultRequest(allocator, endpoint, method, parameters);
 }
 
 pub fn sendDockerBuildRequest(allocator: std.mem.Allocator, context: []const u8, tag: []const u8) !void {
-    try mana.sendDockerBuildRequest(allocator, context, tag);
+    try singleton.sendDockerBuildRequest(allocator, context, tag);
 }
 
 pub fn free(allocator: std.mem.Allocator, mem: *std.json.Value) void {
@@ -48,7 +48,7 @@ const DockerEndpoint = enum(u32) {
     }
 };
 
-const JSONProcessor = struct {
+const JSONProcess = struct {
     const VTable = struct {
         init_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
         deinit_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
@@ -108,7 +108,7 @@ const Mana = struct {
 
     fn processJSON(self: *@This(), comptime Impl: type, inputs: std.json.Value) !std.json.Value {
         var impl_instance: Impl = undefined;
-        var json_processor: JSONProcessor = .implement(Impl, &impl_instance);
+        var json_processor: JSONProcess = .implement(Impl, &impl_instance);
         json_processor.init(self.gpa, self.io);
         defer json_processor.deinit();
 

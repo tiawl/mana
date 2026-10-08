@@ -1,10 +1,6 @@
 const std = @import("std");
-const frontend = @import("frontend");
+const scheduler = @import("frontend");
 const builtin = @import("builtin");
-
-const JSONProcessorTask = frontend.JSONProcessorTask;
-const RequestTask = frontend.RequestTask;
-const Scheduler = frontend.Scheduler;
 
 var safe_allocator_instance: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 const use_safe_allocator = switch (builtin.mode) {
@@ -55,31 +51,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     threaded.setAsyncLimit(.limited(std.Thread.getCpuCount() catch 1));
 
-    var scheduler: Scheduler = undefined;
     scheduler.init(&arena_instance, gpa, io, &init.environ);
     defer scheduler.deinit();
 
-    var api_version_instance: JSONProcessorTask(GetAPIVersion) = undefined;
-    var api_version_task = try scheduler.root_task.dependOn(JSONProcessorTask(GetAPIVersion), &api_version_instance);
+    try scheduler.addRequestTask("docker_version", try valueFromAny(arena, .{
+        .docker = .{
+            .version = "v1.56",
+            .endpoint = "/version",
+            .method = "GET",
+        },
+    }), &.{});
+    try scheduler.addJSONProcessTask(GetAPIVersion, "get_api_version", &.{"docker_version"});
 
-    var docker_version_request_instance: RequestTask = .{
-        .gpa = undefined,
-        .input = try valueFromAny(arena, .{
-            .docker = .{
-                .version = "v1.56",
-                .endpoint = "/version",
-                .method = "GET",
-            },
-        }),
-        .output = undefined,
-    };
-    var docker_version_task = try api_version_task.dependOn(RequestTask, &docker_version_request_instance);
+    //var api_version_instance: JSONProcessTask(GetAPIVersion) = undefined;
+    //var api_version_task = try scheduler.root_task.dependOn(JSONProcessTask(GetAPIVersion), &api_version_instance);
+
+    //var docker_version_request_instance: RequestTask = .{
+    //    .gpa = undefined,
+    //    .input = try valueFromAny(arena, .{
+    //        .docker = .{
+    //            .version = "v1.56",
+    //            .endpoint = "/version",
+    //            .method = "GET",
+    //        },
+    //    }),
+    //    .output = undefined,
+    //};
+    //var docker_version_task = try api_version_task.dependOn(RequestTask, &docker_version_request_instance);
 
     try scheduler.run();
-    docker_version_task.getOutput().?.dump();
-    std.debug.print("\n", .{});
-    api_version_task.getOutput().?.dump();
-    std.debug.print("\n", .{});
+    //docker_version_task.getOutput().?.dump();
+    //std.debug.print("\n", .{});
+    //api_version_task.getOutput().?.dump();
+    //std.debug.print("\n", .{});
 
     //var docker_version = try mana.sendDockerDefaultRequest(gpa, .version, .GET, .{ .hello = "world" });
     //defer mana.free(gpa, &docker_version);
