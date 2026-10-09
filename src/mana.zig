@@ -1,39 +1,35 @@
 const std = @import("std");
 const docker = @import("docker");
-const json = @import("json");
+const c = @import("jq");
 
 var singleton: Mana = undefined;
 
-pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
-    singleton.init(arena, gpa, io, environ);
+pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) !void {
+    try singleton.init(arena, gpa, io, environ);
 }
 
 pub fn deinit() void {
     singleton.deinit();
 }
 
-pub fn processJSON(comptime Impl: type, inputs: std.json.Value) !std.json.Value {
-    return singleton.processJSON(Impl, inputs);
+pub fn queryJSON(filter: []const u8, inputs: c.jv) !c.jv {
+    return singleton.queryJSON(filter, inputs);
 }
 
-pub fn sendRequestValue(allocator: std.mem.Allocator, input: std.json.Value) !std.json.Value {
-    return singleton.sendRequestValue(allocator, input);
+pub fn sendRequestValue(input: c.jv) !c.jv {
+    return singleton.sendRequestValue(input);
 }
 
-pub fn sendRequestAny(allocator: std.mem.Allocator, input: anytype) !std.json.Value {
-    return singleton.sendRequestAny(allocator, input);
+pub fn sendRequestAny(input: anytype) !c.jv {
+    return singleton.sendRequestAny(input);
 }
 
-pub fn sendDockerDefaultRequest(allocator: std.mem.Allocator, endpoint: DockerEndpoint, method: std.http.Method, parameters: anytype) !std.json.Value {
-    return singleton.sendDockerDefaultRequest(allocator, endpoint, method, parameters);
+pub fn sendDockerDefaultRequest(endpoint: DockerEndpoint, method: std.http.Method, parameters: anytype) !c.jv {
+    return singleton.sendDockerDefaultRequest(endpoint, method, parameters);
 }
 
-pub fn sendDockerBuildRequest(allocator: std.mem.Allocator, context: []const u8, tag: []const u8) !void {
-    try singleton.sendDockerBuildRequest(allocator, context, tag);
-}
-
-pub fn free(allocator: std.mem.Allocator, mem: *std.json.Value) void {
-    json.freeValue(allocator, mem);
+pub fn sendDockerBuildRequest(context: []const u8, tag: []const u8) !void {
+    try singleton.sendDockerBuildRequest(context, tag);
 }
 
 const docker_api_version = "v1.56";
@@ -48,44 +44,65 @@ const DockerEndpoint = enum(u32) {
     }
 };
 
-const JSONProcess = struct {
-    const VTable = struct {
-        init_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
-        deinit_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io) void,
-        process_fn: *const fn (*anyopaque, std.mem.Allocator, std.Io, std.json.Value) std.json.Value,
-    };
+const JSONQuery = struct {
+    gpa: std.mem.Allocator,
+    jq: *c.jq_state,
+    filter: [:0]const u8,
 
-    ptr: *anyopaque,
-    vtable: *const VTable,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-
-    pub fn implement(comptime T: type, impl: *T) @This() {
-        return .{
-            .ptr = impl,
-            .vtable = &.{
-                .init_fn = T.init,
-                .deinit_fn = T.deinit,
-                .process_fn = T.process,
-            },
-            .allocator = undefined,
-            .io = undefined,
-        };
-    }
-
-    pub fn init(self: *@This(), allocator: std.mem.Allocator, io: std.Io) void {
-        self.allocator = allocator;
-        self.io = io;
-        self.vtable.init_fn(self.ptr, allocator, io);
+    pub fn init(self: *@This(), gpa: std.mem.Allocator, jq: *c.jq_state, filter: []const u8) !void {
+        self.gpa = gpa;
+        self.jq = jq;
+        self.filter = try self.gpa.dupeSentinel(u8, filter, 0);
     }
 
     pub fn deinit(self: *@This()) void {
-        self.vtable.deinit_fn(self.ptr, self.allocator, self.io);
+        defer self.gpa.free(self.filter);
     }
 
-    pub fn process(self: *@This(), inputs: std.json.Value) std.json.Value {
-        std.debug.assert(std.meta.activeTag(inputs) == .array);
-        return self.vtable.process_fn(self.ptr, self.allocator, self.io, inputs);
+    pub fn query(self: *@This(), inputs: c.jv) !c.jv {
+        std.debug.assert(c.jv_get_kind(inputs) == c.JV_KIND_OBJECT);
+        if (c.jq_compile(self.jq, self.filter) != @intFromBool(true)) return error.MalformedJqFilter;
+        c.jq_start(self.jq, c.jv_copy(inputs), 0);
+        var output = c.jv_array();
+        var result = c.jq_next(self.jq);
+        defer c.jv_free(result);
+
+        while (c.jv_is_valid(result) == @intFromBool(true)) {
+            output = c.jv_array_append(output, result);
+            result = c.jq_next(self.jq);
+        }
+
+        if (c.jq_halted(self.jq) == @intFromBool(true)) {
+            var msg = c.jq_get_error_message(self.jq);
+            defer c.jv_free(msg);
+            const exit_code = c.jq_get_exit_code(self.jq);
+            defer c.jv_free(exit_code);
+            if (c.jv_is_valid(exit_code) == @intFromBool(true)) {
+                if (c.jv_get_kind(msg) != c.JV_KIND_STRING) {
+                    const dump = c.jv_dump_string(msg, c.JV_PRINT_INVALID);
+                    defer c.jv_free(dump);
+                    c.jv_free(msg);
+                    msg = dump;
+                }
+                std.log.err("jq halted with {d} exit code: {s}", .{ c.jv_number_value(exit_code), c.jv_string_value(msg) });
+                return error.JqHalted;
+            }
+        } else if (c.jv_invalid_has_msg(c.jv_copy(result)) == @intFromBool(true)) {
+            var msg = c.jv_invalid_get_msg(c.jv_copy(result));
+            defer c.jv_free(msg);
+            const pos = c.jq_util_input_get_position(self.jq);
+            defer c.jv_free(pos);
+            if (c.jv_get_kind(msg) != c.JV_KIND_STRING) {
+                const dump = c.jv_dump_string(msg, c.JV_PRINT_INVALID);
+                defer c.jv_free(dump);
+                c.jv_free(msg);
+                msg = dump;
+            }
+            std.log.err("jq error at {s}: {s}", .{ c.jv_string_value(pos), c.jv_string_value(msg) });
+            return error.JqReturnInvalidMsg;
+        }
+
+        return output;
     }
 };
 
@@ -94,57 +111,63 @@ const Mana = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     docker_client: docker.Client,
+    jq: *c.jq_state,
+    jq_util_input: *c.jq_util_input_state,
 
-    fn init(self: *@This(), arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
+    fn init(self: *@This(), arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) !void {
         self.arena = arena.allocator();
         self.gpa = gpa;
         self.io = io;
         self.docker_client = .init(arena, gpa, io, environ);
+        if (c.jq_init()) |jq| {
+            self.jq = jq;
+        } else return error.JqInit;
+        if (c.jq_util_input_init(null, null)) |jq_util_input| {
+            self.jq_util_input = jq_util_input;
+        } else return error.JqUtilInputInit;
+        c.jq_set_input_cb(self.jq, c.jq_util_input_next_input_cb, self.jq_util_input);
+        c.jq_util_input_set_parser(self.jq_util_input, c.jv_parser_new(0), 0);
     }
 
     fn deinit(self: *@This()) void {
+        c.jq_util_input_free(@ptrCast(&self.jq_util_input));
+        c.jq_teardown(@ptrCast(&self.jq));
         self.docker_client.deinit();
     }
 
-    fn processJSON(self: *@This(), comptime Impl: type, inputs: std.json.Value) !std.json.Value {
-        var impl_instance: Impl = undefined;
-        var json_processor: JSONProcess = .implement(Impl, &impl_instance);
-        json_processor.init(self.gpa, self.io);
-        defer json_processor.deinit();
+    fn queryJSON(self: *@This(), filter: []const u8, inputs: c.jv) !c.jv {
+        var json_query: JSONQuery = undefined;
+        try json_query.init(self.gpa, self.jq, filter);
+        defer json_query.deinit();
 
-        return json_processor.process(inputs);
+        return json_query.query(inputs);
     }
 
-    fn sendRequestValue(self: *@This(), allocator: std.mem.Allocator, input: std.json.Value) !std.json.Value {
-        std.debug.assert(std.meta.activeTag(input) == .object);
+    fn sendRequestValue(self: *@This(), input: c.jv) !c.jv {
+        std.debug.assert(c.jv_get_kind(input) == c.JV_KIND_OBJECT);
 
-        if (input.object.getPtr("docker")) |req_body| {
-            return self.docker_client.send(allocator, req_body);
-        } else if (input.object.getPtr("docker_build")) |req_body| {
-            return self.docker_client.sendBuild(allocator, req_body);
+        if (c.jv_object_has(c.jv_copy(input), c.jv_string("docker")) == @intFromBool(true)) {
+            const req_body = c.jv_object_get(c.jv_copy(input), c.jv_string("docker"));
+            defer c.jv_free(req_body);
+            return self.docker_client.send(&req_body);
+        } else if (c.jv_object_has(c.jv_copy(input), c.jv_string("docker_build")) == @intFromBool(true)) {
+            const req_body = c.jv_object_get(c.jv_copy(input), c.jv_string("docker_build"));
+            defer c.jv_free(req_body);
+            return self.docker_client.sendBuild(&req_body);
         } else unreachable;
     }
 
-    fn sendRequestAny(self: *@This(), allocator: std.mem.Allocator, input: anytype) !std.json.Value {
-        const source = try self.gpa.print("{f}", .{std.json.fmt(input, .{})});
+    fn sendRequestAny(self: *@This(), input: anytype) !c.jv {
+        const source = try self.gpa.printSentinel("{f}", .{std.json.fmt(input, .{})}, 0);
         defer self.gpa.free(source);
 
-        var diag: std.json.Diagnostics = .{};
-        var scanner: std.json.Scanner = .initCompleteInput(self.gpa, source);
-        defer scanner.deinit();
-        scanner.enableDiagnostics(&diag);
-
-        const parsed = std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
-            .ignore_unknown_fields = true,
-        }) catch |err| {
-            std.log.err("{s}: line {}, column {}", .{ source, diag.getLine(), diag.getColumn() });
-            return err;
-        };
-        return self.sendRequestValue(allocator, parsed);
+        const parsed = c.jv_parse(source.ptr);
+        defer c.jv_free(parsed);
+        return self.sendRequestValue(parsed);
     }
 
-    fn sendDockerDefaultRequest(self: *@This(), allocator: std.mem.Allocator, endpoint: DockerEndpoint, method: std.http.Method, parameters: anytype) !std.json.Value {
-        return self.sendRequestAny(allocator, .{
+    fn sendDockerDefaultRequest(self: *@This(), endpoint: DockerEndpoint, method: std.http.Method, parameters: anytype) !c.jv {
+        return self.sendRequestAny(.{
             .docker = .{
                 .version = docker_api_version,
                 .endpoint = endpoint.toURL(),
@@ -154,8 +177,8 @@ const Mana = struct {
         });
     }
 
-    fn sendDockerBuildRequest(self: *@This(), allocator: std.mem.Allocator, context: []const u8, tag: []const u8) !void {
-        _ = try self.sendRequestAny(allocator, .{
+    fn sendDockerBuildRequest(self: *@This(), context: []const u8, tag: []const u8) !void {
+        _ = try self.sendRequestAny(.{
             .docker_build = .{
                 .version = docker_api_version,
                 .ctx = context,

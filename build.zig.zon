@@ -8,6 +8,14 @@
             .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#50f1b1ccc064ab24db054a0be8f79c7692c7e6e5",
             .hash = "protobuf-5.0.0-0e82antLKADQjGxTrKKjPiM6zV76ZXaeHjuys8GS1OFH",
         },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/tiawl/translate-c?ref=fix#737d0fc3c028127afa1eeca1913198b1d18057d2",
+            .hash = "translate_c-0.0.0-Q_BUWoFOBwD2dbydKN9aHJ_SvHK8HSilweWvlEDNuZGy",
+        },
+        .jq = .{
+            .url = "git+https://github.com/jqlang/jq#a8e6d5f8714ad470ae1dbbf6198dec03092d954c",
+            .hash = "N-V-__8AABwnSQBpnwEDLVKCk7FYIkI49XARdrKtkjLgHfb-",
+        },
     },
     .paths = .{
         "build.zig",

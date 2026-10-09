@@ -3,6 +3,7 @@ const zon = @import("build.zig.zon");
 const name = @tagName(zon.name);
 const protobuf = @import("protobuf");
 const RunProtocStep = protobuf.RunProtocStep;
+const TranslateC = @import("translate_c").Translator;
 
 fn buildOptionsModule(builder: *std.Build) *std.Build.Module {
     const options = builder.addOptions();
@@ -113,16 +114,72 @@ fn buildBuildkitModule(builder: *std.Build) struct { *RunProtocStep, *std.Build.
     };
 }
 
-fn buildJSONModule(builder: *std.Build) *std.Build.Module {
-    return builder.createModule(.{
-        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "json.zig" })),
+fn buildJQModule(builder: *std.Build) !*std.Build.Module {
+    const translate_c_dep = builder.dependency("translate_c", .{});
+    const jq_builder = builder.dependency("jq", .{}).builder;
+    const flags = [_][]const u8{
+        "-DIEEE_8087=1", "-D_GNU_SOURCE=1", "-DUSE_DECNUM=1", // TODO: "-DHAVE_LIBONIG=1",
+    };
+
+    const translate_jq = TranslateC.init(translate_c_dep, .{
+        .c_source_file = jq_builder.path(jq_builder.pathResolve(&.{ "src", "jq.h" })),
         .target = builder.graph.host,
         .optimize = .debug,
-        .imports = &.{},
+        .link_libc = true,
     });
+
+    for ([_][]const u8{
+        "builtin.c", "bytecode.c", "compile.c", "execute.c", "iso8601.c",
+        "lexer.c",   "linker.c",   "locfile.c", "parser.c",  "util.c",
+        "jv.c", "jv_alloc.c", "jv_aux.c", "jv_dtoa.c", "jv_dtoa_tsd.c",
+        "jv_file.c", "jv_parse.c", "jv_print.c", "jv_unicode.c",
+    }) |file_c| {
+        translate_jq.mod.addCSourceFile(.{
+            .file = jq_builder.path(jq_builder.pathResolve(&.{ "src", file_c })),
+            .flags = &flags,
+        });
+    }
+
+    for ([_][]const u8{
+        "decContext.c", "decNumber.c",
+    }) |file_c| {
+        translate_jq.mod.addCSourceFile(.{
+            .file = jq_builder.path(jq_builder.pathResolve(&.{ "vendor", "decNumber", file_c })),
+            .flags = &flags,
+        });
+    }
+
+    const builtin_jq = try jq_builder.root.root_dir.handle.readFileAlloc(builder.graph.io, jq_builder.pathResolve(&.{ "src", "builtin.jq" }), builder.graph.arena, .unlimited);
+    var builtin_inc = try jq_builder.root.root_dir.handle.createFile(builder.graph.io, jq_builder.pathResolve(&.{ "src", "builtin.inc" }), .{});
+    defer builtin_inc.close(builder.graph.io);
+
+    var writer = builtin_inc.writer(builder.graph.io, &.{});
+
+    var col: usize = 0;
+    for (builtin_jq) |byte| {
+        if (col == 16) {
+            try writer.interface.writeByte('\n');
+            col = 0;
+        }
+
+        if (byte < 0o100) {
+            try writer.interface.print("  {o:0>3},", .{byte});
+        } else {
+            try writer.interface.print(" {o:0>4},", .{byte});
+        }
+
+        col += 1;
+    }
+    if (col > 0) try writer.interface.writeByte('\n');
+
+    translate_jq.addIncludePath(jq_builder.path("."));
+    translate_jq.addIncludePath(jq_builder.path("src"));
+    translate_jq.addIncludePath(jq_builder.path("vendor"));
+
+    return translate_jq.mod;
 }
 
-fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, buildkit_mod: *std.Build.Module, json_mod: *std.Build.Module) *std.Build.Module {
+fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, buildkit_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "docker.zig" })),
         .target = builder.graph.host,
@@ -130,53 +187,55 @@ fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, buildk
         .imports = &.{
             .{ .name = "build", .module = options_mod },
             .{ .name = "buildkit", .module = buildkit_mod },
-            .{ .name = "json", .module = json_mod },
+            .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildManaModule(builder: *std.Build, docker_mod: *std.Build.Module, json_mod: *std.Build.Module) *std.Build.Module {
+fn buildManaModule(builder: *std.Build, docker_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.addModule("mana", .{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "mana.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "docker", .module = docker_mod },
-            .{ .name = "json", .module = json_mod },
+            .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildFrontendModule(builder: *std.Build, mana_mod: *std.Build.Module) *std.Build.Module {
+fn buildFrontendModule(builder: *std.Build, mana_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "frontend.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "mana", .module = mana_mod },
+            .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildMainModule(builder: *std.Build, frontend_mod: *std.Build.Module) *std.Build.Module {
+fn buildMainModule(builder: *std.Build, frontend_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "main.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "frontend", .module = frontend_mod },
+            .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildManaExecutable(builder: *std.Build) void {
+fn buildManaExecutable(builder: *std.Build) !void {
     const options_mod = buildOptionsModule(builder);
     const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder);
-    const json_mod = buildJSONModule(builder);
-    const docker_mod = buildDockerModule(builder, options_mod, buildkit_mod, json_mod);
-    const mana_mod = buildManaModule(builder, docker_mod, json_mod);
-    const frontend_mod = buildFrontendModule(builder, mana_mod);
-    const main_mod = buildMainModule(builder, frontend_mod);
+    const jq_mod = try buildJQModule(builder);
+    const docker_mod = buildDockerModule(builder, options_mod, buildkit_mod, jq_mod);
+    const mana_mod = buildManaModule(builder, docker_mod, jq_mod);
+    const frontend_mod = buildFrontendModule(builder, mana_mod, jq_mod);
+    const main_mod = buildMainModule(builder, frontend_mod, jq_mod);
 
     var mana_exe = builder.addExecutable(.{
         .name = "mana",
@@ -189,6 +248,6 @@ fn buildManaExecutable(builder: *std.Build) void {
     builder.getInstallStep().dependOn(&mana_install.step);
 }
 
-pub fn build(builder: *std.Build) void {
-    buildManaExecutable(builder);
+pub fn build(builder: *std.Build) !void {
+    try buildManaExecutable(builder);
 }

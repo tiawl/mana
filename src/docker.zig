@@ -1,7 +1,7 @@
 const std = @import("std");
 const build = @import("build");
 const buildkit = @import("buildkit").v1;
-const json = @import("json");
+const c = @import("jq");
 
 const user_agent = build.name ++ "-" ++ build.version;
 
@@ -40,10 +40,10 @@ const Plain = struct {
     }
 
     fn destroy(plain: *@This()) void {
-        const c = &plain.connection;
-        const gpa = c.client.allocator;
+        const connection = &plain.connection;
+        const gpa = connection.client.allocator;
         const base: [*]align(@alignOf(@This())) u8 = @ptrCast(plain);
-        gpa.free(base[0..allocLen(c.client, c.host_len)]);
+        gpa.free(base[0..allocLen(connection.client, connection.host_len)]);
     }
 
     fn allocLen(http_client: *std.http.Client, host_len: usize) usize {
@@ -108,6 +108,7 @@ pub const Client = struct {
     gpa: std.mem.Allocator,
     http_client: std.http.Client,
     connection: *std.http.Client.Connection,
+    mutex: std.Io.Mutex,
     host: Host,
     verbose: bool,
 
@@ -120,6 +121,7 @@ pub const Client = struct {
                 .io = io,
             },
             .connection = undefined,
+            .mutex = .init,
             .host = .default,
             .verbose = environ.containsConstant("VERBOSE"),
         };
@@ -246,15 +248,25 @@ pub const Client = struct {
         }
     }
 
-    fn sendInner(self: *@This(), allocator: std.mem.Allocator, response: *const Response.Interface, req_body: *std.json.Value) !std.json.Value {
-        std.debug.assert(std.meta.activeTag(req_body.*) == .object);
-        std.debug.assert(req_body.object.getPtr("version") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("version").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("endpoint") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("endpoint").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("method") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("method").?.*) == .string);
-        std.debug.assert(std.meta.stringToEnum(std.http.Method, req_body.object.getPtr("method").?.string) != null);
+    fn sendInner(self: *@This(), response: *const Response.Interface, req_body: *const c.jv) !c.jv {
+        std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+        const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
+        defer c.jv_free(version_jv);
+        std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("endpoint")) == @intFromBool(true));
+        const endpoint_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("endpoint"));
+        defer c.jv_free(endpoint_jv);
+        std.debug.assert(c.jv_get_kind(endpoint_jv) == c.JV_KIND_STRING);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("method")) == @intFromBool(true));
+        const method_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("method"));
+        defer c.jv_free(method_jv);
+        std.debug.assert(c.jv_get_kind(method_jv) == c.JV_KIND_STRING);
+        const method = std.mem.span(c.jv_string_value(method_jv));
+        std.debug.assert(std.meta.stringToEnum(std.http.Method, method) != null);
+
+        try self.mutex.lock(self.http_client.io);
+        defer self.mutex.unlock(self.http_client.io);
 
         // If a connection is initialized without being used later, deinitialization will panic
         if (self.http_client.connection_pool.used.first == null) try self.connect();
@@ -263,34 +275,43 @@ pub const Client = struct {
         defer url.deinit();
 
         try url.writer.writeAll("http://");
-        try url.writer.writeAll(req_body.object.getPtr("version").?.string);
-        try url.writer.writeAll(req_body.object.getPtr("endpoint").?.string);
+        try url.writer.writeAll(std.mem.span(c.jv_string_value(version_jv)));
+        try url.writer.writeAll(std.mem.span(c.jv_string_value(endpoint_jv)));
 
-        if (req_body.object.getPtr("parameters")) |parameters| {
-            var it = parameters.object.iterator();
+        if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
+            const parameters = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters"));
+            defer c.jv_free(parameters);
+            var it = c.jv_object_iter(c.jv_copy(parameters));
             var is_first = true;
-            while (it.next()) |*entry| {
+            var key: c.jv = undefined;
+            var value: c.jv = undefined;
+            while (c.jv_object_iter_valid(c.jv_copy(parameters), it) == @intFromBool(true)) {
                 if (is_first) {
                     try url.writer.writeAll("?");
                     is_first = false;
                 } else try url.writer.writeAll("&");
 
-                try url.writer.writeAll(entry.key_ptr.*);
+                key = c.jv_object_iter_key(c.jv_copy(parameters), it);
+                defer c.jv_free(key);
+                try url.writer.writeAll(std.mem.span(c.jv_string_value(key)));
                 try url.writer.writeAll("=");
-                switch (entry.value_ptr.*) {
-                    .null => {},
-                    .bool => |b| try url.writer.writeAll(if (b) "true" else "false"),
-                    .integer => |i| try url.writer.print("{d}", .{i}),
-                    .float => |f| try url.writer.print("{d}", .{f}),
-                    .string => |s| try url.writer.writeAll(s),
+                value = c.jv_object_iter_value(c.jv_copy(parameters), it);
+                defer c.jv_free(value);
+                switch (c.jv_get_kind(value)) {
+                    c.JV_KIND_NULL => {},
+                    c.JV_KIND_FALSE => try url.writer.writeAll("false"),
+                    c.JV_KIND_TRUE => try url.writer.writeAll("true"),
+                    c.JV_KIND_NUMBER => if (c.jv_number_get_literal(c.jv_copy(value))) |lit| try url.writer.writeAll(std.mem.span(lit)) else try url.writer.print("{d}", .{c.jv_number_value(value)}),
+                    c.JV_KIND_STRING => try url.writer.writeAll(std.mem.span(c.jv_string_value(value))),
                     else => unreachable,
                 }
+                it = c.jv_object_iter_next(c.jv_copy(parameters), it);
             }
         }
 
         const uri = try std.Uri.parse(url.written());
 
-        var req = try self.http_client.request(std.meta.stringToEnum(std.http.Method, req_body.object.getPtr("method").?.string).?, uri, .{
+        var req = try self.http_client.request(std.meta.stringToEnum(std.http.Method, method).?, uri, .{
             .connection = self.connection,
             .headers = response.headers,
         });
@@ -318,11 +339,8 @@ pub const Client = struct {
         var transfer_buffer: [64]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         const reader = http_response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-
-        var scanner: std.json.Scanner = undefined;
-        var diag: std.json.Diagnostics = .{};
-        var parsed: std.json.Value = undefined;
-        var output: std.json.Value = .{ .array = .init(allocator) };
+        var parsed: c.jv = undefined;
+        var output = c.jv_array();
 
         while (true) {
             _ = reader.streamDelimiter(&http_response_body.writer, '\n') catch |err| switch (err) {
@@ -332,18 +350,10 @@ pub const Client = struct {
             };
             _ = reader.toss(1);
 
-            const written = http_response_body.written();
-            scanner = std.json.Scanner.initCompleteInput(self.gpa, written);
-            defer scanner.deinit();
-
-            scanner.enableDiagnostics(&diag);
-
-            parsed = std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
-                .ignore_unknown_fields = true,
-            }) catch |err| {
-                std.log.err("{s}: line {}, column {}", .{ written, diag.getLine(), diag.getColumn() });
-                return err;
-            };
+            const written = try http_response_body.toOwnedSliceSentinel(0);
+            defer self.gpa.free(written);
+            parsed = c.jv_parse(written.ptr);
+            defer c.jv_free(parsed);
 
             try response.process(&output, &parsed);
 
@@ -353,18 +363,18 @@ pub const Client = struct {
         return output;
     }
 
-    pub fn send(self: *@This(), allocator: std.mem.Allocator, req_body: *std.json.Value) !std.json.Value {
+    pub fn send(self: *@This(), req_body: *const c.jv) !c.jv {
         var default_impl: Response.Impl.Default = .{};
         const response = default_impl.response();
-        return try self.sendInner(allocator, &response, req_body);
+        return try self.sendInner(&response, req_body);
     }
 
-    fn writeCtxArchive(self: @This(), writer: *std.Io.Writer, req_body: *std.json.Value) !void {
+    fn writeCtxArchive(self: @This(), writer: *std.Io.Writer, ctx: []const u8) !void {
         var archive: std.tar.Writer = .{ .underlying_writer = writer };
 
         try archive.writeDir(".", .{});
 
-        var dir = try std.Io.Dir.cwd().openDir(self.http_client.io, req_body.object.getPtr("ctx").?.string, .{ .iterate = true });
+        var dir = try std.Io.Dir.cwd().openDir(self.http_client.io, ctx, .{ .iterate = true });
         defer dir.close(self.http_client.io);
 
         var walker = try dir.walk(self.gpa);
@@ -375,7 +385,7 @@ pub const Client = struct {
         var file_content: std.Io.Writer.Allocating = undefined;
 
         while (try walker.next(self.http_client.io)) |entry| {
-            const full_path = try std.fs.path.join(self.gpa, &[_][]const u8{ req_body.object.getPtr("ctx").?.string, entry.path });
+            const full_path = try std.fs.path.join(self.gpa, &[_][]const u8{ ctx, entry.path });
             defer self.gpa.free(full_path);
 
             switch (entry.kind) {
@@ -397,52 +407,55 @@ pub const Client = struct {
         }
     }
 
-    pub fn sendBuild(self: *@This(), allocator: std.mem.Allocator, req_body: *std.json.Value) !std.json.Value {
-        std.debug.assert(std.meta.activeTag(req_body.*) == .object);
-        std.debug.assert(req_body.object.getPtr("ctx") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("ctx").?.*) == .string);
-        std.debug.assert(req_body.object.getPtr("version") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("version").?.*) == .string);
+    pub fn sendBuild(self: *@This(), req_body: *const c.jv) !c.jv {
+        std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("ctx")) == @intFromBool(true));
+        const ctx_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("ctx"));
+        defer c.jv_free(ctx_jv);
+        std.debug.assert(c.jv_get_kind(ctx_jv) == c.JV_KIND_STRING);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+        const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
+        defer c.jv_free(version_jv);
+        std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
+        std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("t")) == @intFromBool(true));
+        const t_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("t"));
+        defer c.jv_free(t_jv);
+        std.debug.assert(c.jv_get_kind(t_jv) == c.JV_KIND_STRING);
         const cwd = std.Io.Dir.cwd();
-        const stat = try cwd.statFile(self.http_client.io, req_body.object.getPtr("ctx").?.string, .{});
+        const ctx = std.mem.span(c.jv_string_value(ctx_jv));
+        const stat = try cwd.statFile(self.http_client.io, ctx, .{});
         std.debug.assert(stat.kind == .directory);
-        std.debug.assert(req_body.object.getPtr("t") != null);
-        std.debug.assert(std.meta.activeTag(req_body.object.getPtr("t").?.*) == .string);
 
         var archive_buf: std.Io.Writer.Allocating = .init(self.gpa);
         defer archive_buf.deinit();
 
-        try self.writeCtxArchive(&archive_buf.writer, req_body);
+        try self.writeCtxArchive(&archive_buf.writer, ctx);
 
-        var req_body_json: std.json.Value = .{ .object = .empty };
-        defer req_body_json.object.deinit(self.gpa);
-        try req_body_json.object.put(self.gpa, "version", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("version").?.string) });
-        defer self.gpa.free(req_body_json.object.getPtr("version").?.string);
-        try req_body_json.object.put(self.gpa, "endpoint", .{ .string = "/build" });
-        try req_body_json.object.put(self.gpa, "method", .{ .string = "POST" });
-
-        try req_body_json.object.put(self.gpa, "parameters", try json.dupeValue(self.gpa, req_body.object.getPtr("parameters") orelse &.{ .object = .empty }));
-        defer json.freeValue(self.gpa, req_body_json.object.getPtr("parameters").?);
-
-        try req_body_json.object.getPtr("parameters").?.object.put(self.gpa, "version", .{ .integer = 2 });
-        defer _ = req_body_json.object.getPtr("parameters").?.object.swapRemove("version");
-        try req_body_json.object.getPtr("parameters").?.object.put(self.gpa, "t", .{ .string = try self.gpa.dupe(u8, req_body.object.getPtr("t").?.string) });
-        defer {
-            self.gpa.free(req_body_json.object.getPtr("parameters").?.object.getPtr("t").?.string);
-            _ = req_body_json.object.getPtr("parameters").?.object.swapRemove("t");
+        var parameters_jv = c.jv_object();
+        defer c.jv_free(parameters_jv);
+        if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
+            parameters_jv = c.jv_object_merge(parameters_jv, c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters")));
         }
+        parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("version"), c.jv_number(2));
+        parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("t"), c.jv_copy(t_jv));
+        var req_body_jv = c.jv_object();
+        defer c.jv_free(req_body_jv);
+        req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("version"), c.jv_copy(version_jv));
+        req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("endpoint"), c.jv_string("/build"));
+        req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("method"), c.jv_string("POST"));
+        req_body_jv = c.jv_object_set(req_body_jv, c.jv_string("parameters"), c.jv_copy(parameters_jv));
 
         var build_impl: Response.Impl.Build = .{
             .arena = self.arena,
         };
         const response = build_impl.response(&archive_buf);
-        return try self.sendInner(allocator, &response, &req_body_json);
+        return try self.sendInner(&response, &req_body_jv);
     }
 
     const Response = struct {
         const Interface = struct {
             const VTable = struct {
-                process_fn: *const fn (*anyopaque, *std.json.Value, *const std.json.Value) anyerror!void,
+                process_fn: *const fn (*anyopaque, *c.jv, *const c.jv) anyerror!void,
             };
 
             ptr: *anyopaque,
@@ -450,18 +463,18 @@ pub const Client = struct {
             body: []u8 = "",
             headers: std.http.Client.Request.Headers,
 
-            fn process(self: @This(), output: *std.json.Value, parsed: *const std.json.Value) !void {
-                std.debug.assert(std.meta.activeTag(output.*) == .array);
+            fn process(self: @This(), output: *c.jv, parsed: *const c.jv) !void {
+                std.debug.assert(c.jv_get_kind(output.*) == c.JV_KIND_ARRAY);
                 try self.vtable.process_fn(self.ptr, output, parsed);
             }
         };
 
         const Impl = struct {
             const Default = struct {
-                fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) !void {
+                fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) !void {
                     const self: *@This() = @ptrCast(@alignCast(ptr));
                     _ = self;
-                    try output.array.append(try json.dupeValue(output.array.allocator, parsed));
+                    output.* = c.jv_array_append(output.*, c.jv_copy(parsed.*));
                 }
 
                 fn response(self: *@This()) Client.Response.Interface {
@@ -485,15 +498,20 @@ pub const Client = struct {
                 proto_reader: std.Io.Reader = undefined,
                 status_resp: buildkit.StatusResponse = undefined,
 
-                fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) !void {
+                fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) !void {
                     _ = output;
                     const self: *@This() = @ptrCast(@alignCast(ptr));
 
-                    if (parsed.object.get("id")) |id| {
-                        if (std.mem.eql(u8, id.string, "moby.buildkit.trace")) {
-                            const b64_encoded = parsed.object.get("aux").?;
-                            const decoded = self.b64_buffer[0..try std.base64.standard.Decoder.calcSizeForSlice(b64_encoded.string)];
-                            try std.base64.standard.Decoder.decode(decoded, b64_encoded.string);
+                    if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("id")) == @intFromBool(true)) {
+                        const id_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("id"));
+                        defer c.jv_free(id_jv);
+                        const id = std.mem.span(c.jv_string_value(id_jv));
+                        if (std.mem.eql(u8, id, "moby.buildkit.trace")) {
+                            const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
+                            defer c.jv_free(aux_jv);
+                            const b64_encoded = std.mem.span(c.jv_string_value(aux_jv));
+                            const decoded = self.b64_buffer[0..try std.base64.standard.Decoder.calcSizeForSlice(b64_encoded)];
+                            try std.base64.standard.Decoder.decode(decoded, b64_encoded);
                             self.proto_reader = .fixed(decoded);
                             self.status_resp = try buildkit.StatusResponse.decode(&self.proto_reader, self.arena);
                             if (self.status_resp.vertexes.items.len > 0) {
@@ -512,11 +530,19 @@ pub const Client = struct {
                             } else if (self.status_resp.warnings.items.len > 0) {
                                 for (self.status_resp.warnings.items) |w| std.debug.print("{s}\n", .{trim(w.short)});
                             } else unreachable;
-                        } else if (std.mem.eql(u8, id.string, "moby.image.id")) {
-                            std.debug.print("Image ID: {s}\n", .{parsed.object.get("aux").?.object.get("ID").?.string});
+                        } else if (std.mem.eql(u8, id, "moby.image.id")) {
+                            const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
+                            defer c.jv_free(aux_jv);
+                            const image_id_jv = c.jv_object_get(c.jv_copy(aux_jv), c.jv_string("ID"));
+                            defer c.jv_free(image_id_jv);
+                            std.debug.print("Image ID: {s}\n", .{c.jv_string_value(image_id_jv)});
                         } else unreachable;
-                    } else if (parsed.object.get("errorDetail")) |err| {
-                        std.log.err("{s}", .{err.object.get("message").?.string});
+                    } else if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("errorDetail")) == @intFromBool(true)) {
+                        const error_detail_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("errorDetail"));
+                        defer c.jv_free(error_detail_jv);
+                        const message_jv = c.jv_object_get(c.jv_copy(error_detail_jv), c.jv_string("message"));
+                        defer c.jv_free(message_jv);
+                        std.log.err("{s}", .{c.jv_string_value(message_jv)});
                         return error.DockerBuild;
                     } else unreachable;
                 }

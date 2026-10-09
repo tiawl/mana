@@ -1,21 +1,22 @@
 const std = @import("std");
 const mana = @import("mana");
+const c = @import("jq");
 
 var singleton: Scheduler = undefined;
 
-pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
-    singleton.init(arena, gpa, io, environ);
+pub fn init(arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) !void {
+    try singleton.init(arena, gpa, io, environ);
 }
 
 pub fn deinit() void {
     singleton.deinit();
 }
 
-pub fn addJSONProcessTask(comptime Impl: type, key: []const u8, inputs: []const []const u8) !void {
-    try singleton.addJSONProcessTask(Impl, key, inputs);
+pub fn addJSONQueryTask(key: []const u8, filter: []const u8, inputs: []const []const u8) !void {
+    try singleton.addJSONQueryTask(key, filter, inputs);
 }
 
-pub fn addRequestTask(key: []const u8, input: std.json.Value, dependencies: []const []const u8) !void {
+pub fn addRequestTask(key: []const u8, input: c.jv, dependencies: []const []const u8) !void {
     try singleton.addRequestTask(key, input, dependencies);
 }
 
@@ -23,108 +24,109 @@ pub fn run() !void {
     try singleton.run();
 }
 
-// TODO: It should take std.Io.Group for potential async loops
-fn JSONProcessTask(comptime Impl: type) type {
-    return struct {
-        arena: std.mem.Allocator,
-        gpa: std.mem.Allocator,
-        inputs: std.ArrayList(*const std.json.Value),
-        output: std.json.Value,
+const JSONQueryTask = struct {
+    filter: []const u8,
+    inputs: *const std.StringHashMap(*Task),
+    output: c.jv,
+    interface: *const Task,
 
-        pub fn init(ptr: *anyopaque, arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io) void {
-            var self: *@This() = @ptrCast(@alignCast(ptr));
-            _ = io;
-            self.arena = arena.allocator();
-            self.gpa = gpa;
-            self.inputs = .empty;
-        }
+    pub fn task(self: *@This(), filter: []const u8, inputs: *const std.StringHashMap(*Task)) Task {
+        self.filter = filter;
+        self.inputs = inputs;
+        self.output = c.jv_null();
+        return .implement(@This(), self);
+    }
 
-        pub fn deinit(ptr: *anyopaque) void {
-            var self: *@This() = @ptrCast(@alignCast(ptr));
-            self.inputs.deinit(self.gpa);
-        }
-
-        pub fn run(ptr: *anyopaque) !void {
-            var self: *@This() = @ptrCast(@alignCast(ptr));
-
-            var inputs: std.json.Value = .{
-                .array = .init(self.gpa),
-            };
-            defer inputs.array.deinit();
-
-            for (self.inputs.items) |input| try inputs.array.append(input.*);
-
-            const source = try self.gpa.print("{f}", .{std.json.fmt(inputs, .{})});
-            defer self.gpa.free(source);
-
-            var diag: std.json.Diagnostics = .{};
-            var scanner: std.json.Scanner = .initCompleteInput(self.gpa, source);
-            defer scanner.deinit();
-            scanner.enableDiagnostics(&diag);
-
-            const parsed = std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
-                .ignore_unknown_fields = true,
-            }) catch |err| {
-                std.log.err("{s}: line {}, column {}", .{ source, diag.getLine(), diag.getColumn() });
-                return err;
-            };
-            self.output = try mana.processJSON(Impl, parsed);
-        }
-
-        pub fn dependOn(ptr: *anyopaque, child: *const Task) !void {
-            var self: *@This() = @ptrCast(@alignCast(ptr));
-            try self.inputs.append(self.gpa, child.getOutput().?);
-        }
-
-        pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
-            const self: *const @This() = @ptrCast(@alignCast(ptr));
-            return &self.output;
-        }
-
-        pub fn task(self: *@This()) Task {
-            return .implement(@This(), self);
-        }
-    };
-}
-
-const RequestTask = struct {
-    gpa: std.mem.Allocator,
-    input: std.json.Value,
-    output: std.json.Value,
-
-    pub fn init(ptr: *anyopaque, arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io) void {
-        var self: *@This() = @ptrCast(@alignCast(ptr));
-        _ = .{ arena, io };
-        self.gpa = gpa;
+    pub fn init(ptr: *anyopaque, interface: *const Task) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.interface = interface;
     }
 
     pub fn deinit(ptr: *anyopaque) void {
-        var self: *@This() = @ptrCast(@alignCast(ptr));
-        mana.free(self.gpa, &self.output);
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const dump = c.jv_dump_string(c.jv_copy(self.output), c.JV_PRINT_INVALID);
+        defer c.jv_free(dump);
+        std.log.debug("{s}", .{c.jv_string_value(dump)});
+        c.jv_free(self.output);
     }
 
     pub fn run(ptr: *anyopaque) !void {
         var self: *@This() = @ptrCast(@alignCast(ptr));
-        self.output = try mana.sendRequestValue(self.gpa, self.input);
+
+        var inputs = c.jv_object();
+        defer c.jv_free(inputs);
+
+        var it = self.inputs.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.getOutput()) |output| {
+                // TODO: remove arena here:
+                inputs = c.jv_object_set(inputs, c.jv_string(try self.interface.arena.allocator().dupeSentinel(u8, entry.key_ptr.*, 0)), c.jv_copy(output.*));
+            }
+        }
+
+        c.jv_free(self.output);
+        self.output = try mana.queryJSON(self.filter, inputs);
     }
 
     pub fn dependOn(ptr: *anyopaque, child: *const Task) !void {
         _ = .{ ptr, child };
     }
 
-    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
+    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
         const self: *const @This() = @ptrCast(@alignCast(ptr));
         return &self.output;
     }
+};
 
-    pub fn task(self: *@This()) Task {
+const RequestTask = struct {
+    input: c.jv,
+    output: c.jv,
+    interface: *const Task,
+
+    pub fn task(self: *@This(), input: c.jv) Task {
+        self.input = input;
+        self.output = c.jv_null();
         return .implement(@This(), self);
+    }
+
+    pub fn init(ptr: *anyopaque, interface: *const Task) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.interface = interface;
+    }
+
+    pub fn deinit(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const dump = c.jv_dump_string(c.jv_copy(self.output), c.JV_PRINT_INVALID);
+        defer c.jv_free(dump);
+        std.log.debug("{s}", .{c.jv_string_value(dump)});
+        c.jv_free(self.input);
+        c.jv_free(self.output);
+    }
+
+    pub fn run(ptr: *anyopaque) !void {
+        var self: *@This() = @ptrCast(@alignCast(ptr));
+        c.jv_free(self.output);
+        self.output = try mana.sendRequestValue(self.input);
+    }
+
+    pub fn dependOn(ptr: *anyopaque, child: *const Task) !void {
+        _ = .{ ptr, child };
+    }
+
+    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
+        const self: *const @This() = @ptrCast(@alignCast(ptr));
+        return &self.output;
     }
 };
 
+// TODO: split this into GroupTask + CallTask
 const InitTask = struct {
-    pub fn init(ptr: *anyopaque, arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io) void {
-        _ = .{ ptr, arena, gpa, io };
+    pub fn task(self: *@This()) Task {
+        return .implement(@This(), self);
+    }
+
+    pub fn init(ptr: *anyopaque, interface: *const Task) void {
+        _ = .{ ptr, interface };
     }
 
     pub fn deinit(ptr: *anyopaque) void {
@@ -139,23 +141,19 @@ const InitTask = struct {
         _ = .{ ptr, child };
     }
 
-    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
+    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
         _ = ptr;
         return null;
-    }
-
-    pub fn task(self: *@This()) Task {
-        return .implement(@This(), self);
     }
 };
 
 const Task = struct {
     const VTable = struct {
-        init_fn: *const fn (*anyopaque, *std.heap.ArenaAllocator, std.mem.Allocator, std.Io) void,
+        init_fn: *const fn (*anyopaque, *const Task) void,
         deinit_fn: *const fn (*anyopaque) void,
         run_fn: *const fn (*anyopaque) anyerror!void,
         depend_on_fn: *const fn (*anyopaque, *const Task) anyerror!void,
-        get_output_fn: *const fn (*const anyopaque) ?*const std.json.Value,
+        get_output_fn: *const fn (*const anyopaque) ?*const c.jv,
     };
 
     ptr: *anyopaque,
@@ -167,6 +165,8 @@ const Task = struct {
     parents: std.ArrayList(*@This()),
     pending: std.atomic.Value(usize),
     ready: std.Io.Event,
+    spawned: bool,
+    mutex: std.Io.Mutex,
 
     pub fn implement(comptime T: type, impl: *T) @This() {
         return .{
@@ -185,6 +185,8 @@ const Task = struct {
             .parents = .empty,
             .pending = undefined,
             .ready = undefined,
+            .spawned = undefined,
+            .mutex = undefined,
         };
     }
 
@@ -192,28 +194,24 @@ const Task = struct {
         self.arena = arena;
         self.gpa = gpa;
         self.io = io;
-        self.vtable.init_fn(self.ptr, arena, gpa, io);
+        self.spawned = false;
+        self.mutex = .init;
+        self.vtable.init_fn(self.ptr, self);
     }
 
     pub fn deinit(self: *@This()) void {
         self.vtable.deinit_fn(self.ptr);
-        for (0..self.children.items.len) |i| {
-            self.children.items[i].deinit();
-            self.gpa.destroy(self.children.items[i]);
-        }
         self.children.deinit(self.gpa);
         self.parents.deinit(self.gpa);
     }
 
     pub fn dependOn(self: *@This(), child: *@This()) !void {
-        try self.children.append(self.gpa, try self.gpa.create(@This()));
-        self.children.last().?.* = child.*;
-        self.children.last().?.init(self.arena, self.gpa, self.io);
-        try self.children.last().?.parents.append(self.gpa, self);
-        try self.vtable.depend_on_fn(self.ptr, self.children.last().?);
+        try self.children.append(self.gpa, child);
+        try child.parents.append(self.gpa, self);
+        try self.vtable.depend_on_fn(self.ptr, child);
     }
 
-    pub fn getOutput(self: *const @This()) ?*const std.json.Value {
+    pub fn getOutput(self: *const @This()) ?*const c.jv {
         return self.vtable.get_output_fn(self.ptr);
     }
 
@@ -241,19 +239,25 @@ const Task = struct {
         return true;
     }
 
-    fn spawn(self: *@This(), group: *std.Io.Group) void {
+    fn spawn(self: *@This(), group: *std.Io.Group) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.spawned) return;
+        self.spawned = true;
+
         self.pending = .init(self.children.items.len);
         self.ready = .unset;
 
-        group.async(self.io, @This().run, .{self});
-        for (self.children.items) |child| child.spawn(group);
+        group.async(self.io, @This().run, .{self, group});
+        for (self.children.items) |child| try child.spawn(group);
     }
 
-    fn run(self: *@This()) error{Canceled}!void {
+    fn run(self: *@This(), group: *std.Io.Group) error{Canceled}!void {
         if (self.pending.load(.acquire) > 0) try self.ready.wait(self.io);
 
         self.vtable.run_fn(self.ptr) catch |err| {
             std.log.err("{s} happened when run asynchronously", .{@errorName(err)});
+            group.cancel(self.io);
             return error.Canceled;
         };
 
@@ -272,8 +276,8 @@ const Scheduler = struct {
     io: std.Io,
     group: std.Io.Group,
 
-    pub fn init(self: *@This(), arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
-        mana.init(arena, gpa, io, environ);
+    pub fn init(self: *@This(), arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) !void {
+        try mana.init(arena, gpa, io, environ);
         self.arena = arena;
         self.gpa = gpa;
         self.io = io;
@@ -286,36 +290,41 @@ const Scheduler = struct {
     pub fn deinit(self: *@This()) void {
         self.init_task.deinit();
         var it = self.tasks.iterator();
-        while (it.next()) |*entry| self.gpa.free(entry.key_ptr.*);
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit();
+            self.gpa.destroy(entry.value_ptr.*);
+            self.gpa.free(entry.key_ptr.*);
+        }
         self.tasks.deinit();
         mana.deinit();
     }
 
     // TODO: hash the key
-    fn addTask(self: *@This(), comptime TaskImpl: type, key: []const u8, instance: *TaskImpl, dependencies: []const []const u8) !void {
-        var task = instance.task();
-        try self.init_task.dependOn(&task);
-        try self.tasks.put(try self.gpa.dupe(u8, key), &task);
+    fn addTask(self: *@This(), key: []const u8, task_ptr: *Task, dependencies: []const []const u8) !void {
+        task_ptr.init(self.arena, self.gpa, self.io);
+        if (self.tasks.contains(key)) {
+            task_ptr.deinit();
+            return error.DuplicatedId;
+        }
+        try self.init_task.dependOn(task_ptr);
+        try self.tasks.put(try self.gpa.dupe(u8, key), task_ptr);
         for (dependencies) |dep_key| {
             try self.tasks.get(key).?.dependOn(self.tasks.get(dep_key).?);
         }
     }
 
-    pub fn addJSONProcessTask(self: *@This(), comptime Impl: type, key: []const u8, inputs: []const []const u8) !void {
-        const instance = try self.arena.allocator().create(JSONProcessTask(Impl));
-
-        try self.addTask(JSONProcessTask(Impl), key, instance, inputs);
+    pub fn addJSONQueryTask(self: *@This(), key: []const u8, filter: []const u8, dependencies: []const []const u8) !void {
+        const instance = try self.arena.allocator().create(JSONQueryTask);
+        const task_ptr = try self.gpa.create(Task);
+        task_ptr.* = instance.task(filter, &self.tasks);
+        try self.addTask(key, task_ptr, dependencies);
     }
 
-    pub fn addRequestTask(self: *@This(), key: []const u8, input: std.json.Value, dependencies: []const []const u8) !void {
+    pub fn addRequestTask(self: *@This(), key: []const u8, input: c.jv, dependencies: []const []const u8) !void {
         const instance = try self.arena.allocator().create(RequestTask);
-        instance.* = .{
-            .gpa = undefined,
-            .input = input,
-            .output = undefined,
-        };
-
-        try self.addTask(RequestTask, key, instance, dependencies);
+        const task_ptr = try self.gpa.create(Task);
+        task_ptr.* = instance.task(input);
+        try self.addTask(key, task_ptr, dependencies);
     }
 
     pub fn run(self: *@This()) !void {
@@ -324,7 +333,7 @@ const Scheduler = struct {
         self.group = .init;
         defer self.group.cancel(self.io);
 
-        self.init_task.spawn(&self.group);
+        try self.init_task.spawn(&self.group);
         try self.group.await(self.io);
     }
 };
