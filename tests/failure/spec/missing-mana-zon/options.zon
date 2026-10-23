@@ -1,0 +1,6 @@
+.{
+    .args = .{
+        "dummy",
+    },
+    .err = "SpecMissingManaZon",
+}

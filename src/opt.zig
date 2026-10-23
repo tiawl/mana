@@ -100,17 +100,17 @@ const ArgIterator = struct {
         defer if (allocated) self.gpa.free(arg);
         if (self.deque.len > 0) {
             arg = self.gpa.dupeSentinel(u8, self.deque.front().?, 0) catch |err| switch (err) {
-                error.OutOfMemory => exit.unexpectedly("Out of memory when duping this contracted short option without paramater: {s}", .{arg}),
+                error.OutOfMemory => exit.unexpectedly(err, "Occured when duping contracted short option without paramater", .{ .arg = arg }),
             };
             allocated = true;
             self.popFront();
         }
 
         self.append("{s}", .{arg[0..2]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this contracted short option without paramater and appending the first part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when splitting contracted short option without paramater and appending the first part", .{ .arg = arg }),
         };
         self.append("-{s}", .{arg[2..]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this contracted short option without paramater and appending the second part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Out of memory when splitting contracted short option without paramater and appending the second part", .{ .arg = arg }),
         };
     }
 
@@ -124,17 +124,17 @@ const ArgIterator = struct {
         defer if (allocated) self.gpa.free(arg);
         if (self.deque.len > 0) {
             arg = self.gpa.dupeSentinel(u8, self.deque.front().?, 0) catch |err| switch (err) {
-                error.OutOfMemory => exit.unexpectedly("Out of memory when duping this contracted short option with 1 paramater: {s}", .{arg}),
+                error.OutOfMemory => exit.unexpectedly(err, "Occured when duping contracted short option with 1 paramater", .{ .arg = arg }),
             };
             allocated = true;
             self.popFront();
         }
 
         self.append("{s}", .{arg[0..2]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this contracted short option with 1 paramater and appending the first part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when splitting contracted short option with 1 paramater and appending the first part", .{ .arg = arg }),
         };
         self.append("{s}", .{arg[2..]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this contracted short option without paramater and appending the second part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when splitting contracted short option without paramater and appending the second part", .{ .arg = arg }),
         };
     }
 
@@ -149,17 +149,17 @@ const ArgIterator = struct {
         defer if (allocated) self.gpa.free(arg);
         if (self.deque.len > 0) {
             arg = self.gpa.dupeSentinel(u8, self.deque.front().?, 0) catch |err| switch (err) {
-                error.OutOfMemory => exit.unexpectedly("Out of memory when duping this equal long option with 1 paramater: {s}", .{arg}),
+                error.OutOfMemory => exit.unexpectedly(err, "Occured when duping equal long option with 1 paramater", .{ .arg = arg }),
             };
             allocated = true;
             self.popFront();
         }
 
         self.append("{s}", .{arg[0..equal_index.?]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this equal long option with 1 paramater and appending the first part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when splitting equal long option with 1 paramater and appending the first part", .{ .arg = arg }),
         };
         if (arg[equal_index.? + 1 ..].len > 0) self.append("{s}", .{arg[equal_index.? + 1 ..]}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when splitting this equal long option with 1 paramater and appending the second part: {s}", .{arg}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when splitting equal long option with 1 paramater and appending the second part", .{ .arg = arg }),
         };
     }
 
@@ -217,8 +217,7 @@ pub const OptionsParser = struct {
 
     pub fn parse(self: *@This(), init_args: *const std.process.Args) void {
         const args = init_args.toSlice(self.arena) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when allocatin a slice for arguments", .{}),
-            error.Unexpected => exit.unexpectedly("The Operating System returned an undocumented error code", .{}),
+            error.OutOfMemory, error.Unexpected => exit.unexpectedly(err, "Occured when allocating a slice for arguments", .{}),
         };
 
         var it = ArgIterator.init(self.gpa, args);
@@ -232,9 +231,12 @@ pub const OptionsParser = struct {
             } else if (isUsed(.version, arg_z)) {
                 self.needVersion();
             } else {
-                if (self.rule != null) exit.expectedly("You can't run 2 rules", .{});
+                if (self.rule != null) exit.expectedly(error.UniqueRule, "You can't run 2 rules", .{
+                    .first_rule = self.rule,
+                    .second_rule = arg,
+                });
                 self.rule = self.gpa.dupe(u8, arg) catch |err| switch (err) {
-                    error.OutOfMemory => exit.unexpectedly("Out of memory when duping this rule name: {s}", .{arg}),
+                    error.OutOfMemory => exit.unexpectedly(err, "Occured when duping rule name", .{ .arg = arg }),
                 };
             }
         }

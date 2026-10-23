@@ -286,14 +286,17 @@ pub fn build(builder: *std.Build) !void {
 
 const TestOptions = struct {
     args: []const []const u8,
+    stderr: ?[]const u8 = null,
+    err: ?[]const u8 = null,
 };
 
-fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, result_id_manazon: []const u8) !void {
+fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, manazon_path: []const u8) !void {
     const direct_mana = builder.addRunArtifact(mana_exe);
     const indirect_mana = builder.addRunArtifact(mana_exe);
-    const result_id = std.fs.path.dirname(result_id_manazon).?;
-    const result = std.fs.path.dirname(result_id).?;
-    const options_source = try tests_dir.readFileAllocOptions(builder.graph.io, builder.pathResolve(&.{ result_id, "options.zon" }), builder.graph.arena, .unlimited, .of(u8), 0);
+    const manazon_dir = std.fs.path.dirname(manazon_path).?;
+    var it = std.fs.path.componentIterator(manazon_path);
+    const result = it.first().?.name;
+    const options_source = try tests_dir.readFileAllocOptions(builder.graph.io, builder.pathResolve(&.{ manazon_dir, "options.zon" }), builder.graph.arena, .unlimited, .of(u8), 0);
     var diag: std.zon.parse.Diagnostics = undefined;
     const options = try std.zon.parse.fromSlice(TestOptions, .{
         .gpa = builder.allocator,
@@ -304,14 +307,13 @@ fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *s
     for ([_]*std.Build.Step.Run{ direct_mana, indirect_mana }) |mana| {
         mana.has_side_effects = true;
         mana.addArgs(options.args);
-        mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", result_id })));
+        mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", manazon_dir })));
         if (std.mem.eql(u8, result, "success")) {
             mana.expectExitCode(0);
-            const stderr = try tests_dir.readFileAllocOptions(builder.graph.io, builder.pathResolve(&.{ result_id, "stderr.txt" }), builder.graph.arena, .unlimited, .of(u8), '\n');
-            mana.expectStdErrEqual(stderr);
+            mana.expectStdErrEqual(builder.fmt("{s}\n", .{options.stderr.?}));
         } else if (std.mem.eql(u8, result, "failure")) {
             mana.expectExitCode(1);
-            _ = mana.captureStdErr(.{});
+            mana.expectStdErrMatch(builder.fmt("    .id = .{s},", .{options.err.?}));
         } else unreachable;
         test_step.dependOn(&mana.step);
     }
@@ -354,5 +356,5 @@ fn testManaExecutable(builder: *std.Build, mana_exe: *std.Build.Step.Compile, ma
         }
     }
 
-    try runTest(builder, mana_exe, test_step, tests_dir, &start_redirect.step, &stop_redirect.step, builder.pathResolve(&.{ "failure", "missing_mana_zon", "dummy" }));
+    try runTest(builder, mana_exe, test_step, tests_dir, &start_redirect.step, &stop_redirect.step, builder.pathResolve(&.{ "failure", "spec", "missing-mana-zon", "dummy" }));
 }

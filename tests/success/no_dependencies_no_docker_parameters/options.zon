@@ -2,4 +2,6 @@
     .args = .{
         "get-platform",
     },
+    .stderr = \\Docker Engine - Community
+        ,
 }
