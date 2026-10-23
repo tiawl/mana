@@ -286,6 +286,8 @@ pub fn build(builder: *std.Build) !void {
 
 const TestOptions = struct {
     args: []const []const u8,
+    stderr: ?[]const u8 = null,
+    err: ?[]const u8 = null,
 };
 
 fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, result_id_manazon: []const u8) !void {
@@ -307,11 +309,10 @@ fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *s
         mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", result_id })));
         if (std.mem.eql(u8, result, "success")) {
             mana.expectExitCode(0);
-            const stderr = try tests_dir.readFileAllocOptions(builder.graph.io, builder.pathResolve(&.{ result_id, "stderr.txt" }), builder.graph.arena, .unlimited, .of(u8), '\n');
-            mana.expectStdErrEqual(stderr);
+            mana.expectStdErrEqual(builder.fmt("{s}\n", .{options.stderr.?}));
         } else if (std.mem.eql(u8, result, "failure")) {
             mana.expectExitCode(1);
-            _ = mana.captureStdErr(.{});
+            mana.expectStdErrMatch(builder.fmt("    .id = .{s},", .{options.err.?}));
         } else unreachable;
         test_step.dependOn(&mana.step);
     }

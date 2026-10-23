@@ -1,0 +1,10 @@
+.{
+    .@"get-platform" = .{
+        .@"docker/docker_version" = .{
+            .endpoint = "/version",
+            .version = "v1.56",
+            .version = "v1.55",
+            .method = .GET,
+        },
+    },
+}

@@ -1,0 +1,6 @@
+.{
+    .args = .{
+        "get-platform",
+    },
+    .err = "DuplicatedDependenciesIntoDockerModule",
+}

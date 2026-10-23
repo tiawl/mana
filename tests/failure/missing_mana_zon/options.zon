@@ -2,4 +2,5 @@
     .args = .{
         "dummy",
     },
+    .err = "MissingManaZon",
 }

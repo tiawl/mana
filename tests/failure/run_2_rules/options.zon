@@ -3,4 +3,5 @@
         "get-platform",
         "get-platform",
     },
+    .err = "UniqueRule",
 }

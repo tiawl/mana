@@ -6,7 +6,8 @@ Think more about it:
 - add CommandTask for ssh ?
 
 Go for it:
-- write tests for exit.expected(1) cases
+- remove 'std.log.err' and replace with pointers
+- write tests for exit.expectedly() cases
 - return err if rule name:
   - contains whitespace
   - starts with dash

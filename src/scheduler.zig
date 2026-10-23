@@ -62,9 +62,9 @@ const JSONQueryTask = struct {
 
         c.jv_free(self.output);
         self.output = mana.jsonQuery(self.filter, inputs) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when trying to produce a JSON query with mana", .{}),
-            error.IncorrectJqFilter => exit.expectedly("The provided jq filter is incorrect", .{}),
-            error.JqHalted, error.JqInvalidMsg => exit.expectedly("", .{}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when trying to produce a JSON query with mana", .{}),
+            error.IncorrectJqFilter => exit.expectedly(err, "The provided jq filter is incorrect", .{}),
+            error.JqHalted, error.JqInvalidMsg => exit.expectedly(err, "A jq error occured", .{}),
         };
     }
 
@@ -95,7 +95,7 @@ const RequestTask = struct {
     pub fn run(ptr: *anyopaque) void {
         var self: *@This() = @ptrCast(@alignCast(ptr));
         c.jv_free(self.output);
-        self.output = mana.sendRequestValue(self.input) catch |err| exit.unexpectedly("{s} when trying to send a request with mana", .{@errorName(err)});
+        self.output = mana.sendRequestValue(self.input) catch |err| exit.unexpectedly(err, "Occured when trying to send a request with mana", .{});
     }
 
     pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
@@ -113,18 +113,18 @@ const PlaceHolderTask = struct {
     }
 
     pub fn deinit(ptr: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        exit.expectedly("Undefined task \"{s}\"", .{self.name});
+        const self: *const @This() = @ptrCast(@alignCast(ptr));
+        exit.expectedly(error.UndefinedTaskId, "Undefined task id", .{ .task = self.name });
     }
 
     pub fn run(ptr: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        exit.expectedly("Undefined task \"{s}\"", .{self.name});
+        const self: *const @This() = @ptrCast(@alignCast(ptr));
+        exit.expectedly(error.UndefinedTaskId, "Undefined task id", .{ .task = self.name });
     }
 
     pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
         const self: *const @This() = @ptrCast(@alignCast(ptr));
-        exit.expectedly("Undefined task \"{s}\"", .{self.name});
+        exit.expectedly(error.UndefinedTaskId, "Undefined task id", .{ .task = self.name });
     }
 };
 
@@ -204,10 +204,10 @@ const Task = struct {
 
     pub fn dependOn(self: *@This(), child: *@This()) void {
         self.children.append(self.gpa, child) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when appending child dependency", .{}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when appending child dependency", .{}),
         };
         child.parents.append(self.gpa, self) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when appending parent dependency", .{}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when appending parent dependency", .{}),
         };
     }
 
@@ -229,10 +229,10 @@ const Task = struct {
         if (visited.contains(self)) return true;
 
         visited.put(self, {}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when trying to add a new key into visited HashMap to determine if dependency graph is acyclic", .{}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured memory when trying to add a new key into visited HashMap to determine if dependency graph is acyclic", .{}),
         };
         on_path.put(self, {}) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when trying to add a new key into on_path HashMap to determine if dependency graph is acyclic", .{}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when trying to add a new key into on_path HashMap to determine if dependency graph is acyclic", .{}),
         };
 
         for (self.children.items) |child| {
@@ -247,7 +247,7 @@ const Task = struct {
         self.mutex.lock(self.io) catch |err| {
             group.cancel(self.io);
             switch (err) {
-                error.Canceled => exit.unexpectedly("Canceled while mutex was locked", .{}),
+                error.Canceled => exit.unexpectedly(err, "Occured while mutex was locked", .{}),
             }
         };
         defer self.mutex.unlock(self.io);
@@ -265,7 +265,7 @@ const Task = struct {
         if (self.pending.load(.acquire) > 0) self.ready.wait(self.io) catch |err| {
             group.cancel(self.io);
             switch (err) {
-                error.Canceled => exit.unexpectedly("Canceled while event waits", .{}),
+                error.Canceled => exit.unexpectedly(err, "Occured while event waits", .{}),
             }
         };
 
@@ -289,7 +289,7 @@ const Scheduler = struct {
 
     pub fn init(self: *@This(), arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
         mana.init(arena_instance, gpa, io, environ) catch |err| switch (err) {
-            error.JqInit, error.JqUtilInputInit => exit.unexpectedly("Failure when initializing jq. This is certainly a memory allocation failure", .{}),
+            error.JqInit, error.JqUtilInputInit => exit.unexpectedly(err, "Occured when initializing jq. This is certainly a memory allocation failure", .{}),
         };
         self.arena_instance = arena_instance;
         self.arena = self.arena_instance.allocator();
@@ -318,7 +318,7 @@ const Scheduler = struct {
         if (self.tasks.get(key)) |task| {
             if (!task.is_place_holder) {
                 task_ptr.deinit();
-                exit.expectedly("Duplicated task id", .{});
+                exit.expectedly(error.DuplicatedTaskId, "Duplicated task id", .{ .task = key });
             }
             task.ptr = task_ptr.ptr;
             task.vtable = task_ptr.vtable;
@@ -328,28 +328,40 @@ const Scheduler = struct {
             task_ptr.init(self.arena_instance, self.gpa, self.io);
             self.init_task.dependOn(task_ptr);
             const duped = self.gpa.dupe(u8, key) catch |err| switch (err) {
-                error.OutOfMemory => exit.unexpectedly("Out of memory when duping the task id: \"{s}\"", .{key}),
+                error.OutOfMemory => exit.unexpectedly(err, "Occured when duping the task id", .{ .task = key }),
             };
             self.tasks.put(duped, task_ptr) catch |err| switch (err) {
-                error.OutOfMemory => exit.unexpectedly("Out of memory when putting the task: \"{s}\"", .{key}),
+                error.OutOfMemory => exit.unexpectedly(err, "Occured when putting the task", .{ .task = key }),
             };
         }
         for (dependencies) |dep_key| {
             if (!self.tasks.contains(dep_key)) {
                 const instance = self.arena.create(PlaceHolderTask) catch |err| switch (err) {
-                    error.OutOfMemory => exit.unexpectedly("Out of memory when creating place holder task: \"{s}\"", .{dep_key}),
+                    error.OutOfMemory => exit.unexpectedly(err, "Occured when creating place holder task", .{
+                        .task = key,
+                        .dependency = dep_key,
+                    }),
                 };
                 const place_holder_ptr = self.gpa.create(Task) catch |err| switch (err) {
-                    error.OutOfMemory => exit.unexpectedly("Out of memory when creating place holder task interface: \"{s}\"", .{dep_key}),
+                    error.OutOfMemory => exit.unexpectedly(err, "Occured when creating place holder task interface", .{
+                        .task = key,
+                        .dependency = dep_key,
+                    }),
                 };
                 const duped = self.gpa.dupe(u8, dep_key) catch |err| switch (err) {
-                    error.OutOfMemory => exit.unexpectedly("Out of memory when duping the dependency task id: \"{s}\"", .{dep_key}),
+                    error.OutOfMemory => exit.unexpectedly(err, "Occured when duping the dependency task id", .{
+                        .task = key,
+                        .dependency = dep_key,
+                    }),
                 };
                 place_holder_ptr.* = instance.task(duped);
                 place_holder_ptr.init(self.arena_instance, self.gpa, self.io);
                 self.init_task.dependOn(place_holder_ptr);
                 self.tasks.put(duped, place_holder_ptr) catch |err| switch (err) {
-                    error.OutOfMemory => exit.unexpectedly("Out of memory when putting the place holder task dependency \"{s}\" for the task \"{s}\"", .{ dep_key, key }),
+                    error.OutOfMemory => exit.unexpectedly(err, "Occured when putting the place holder task dependency \"{s}\" for the task \"{s}\"", .{
+                        .task = key,
+                        .dependency = dep_key,
+                    }),
                 };
             }
             self.tasks.get(key).?.dependOn(self.tasks.get(dep_key).?);
@@ -358,30 +370,30 @@ const Scheduler = struct {
 
     pub fn addJSONQueryTask(self: *@This(), key: []const u8, filter: []const u8, dependencies: []const []const u8) void {
         const instance = self.arena.create(JSONQueryTask) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when creating JSON query task: \"{s}\"", .{key}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when creating JSON query task", .{ .task = key }),
         };
         const task_ptr = self.gpa.create(Task) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when creating JSON query task interface: \"{s}\"", .{key}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when creating JSON query task interface", .{ .task = key }),
         };
         task_ptr.* = instance.task(self.gpa, filter, &self.tasks) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when duping JSON query filter: \"{s}\"", .{key}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when duping JSON query filter", .{ .task = key }),
         };
         self.addTask(key, task_ptr, dependencies);
     }
 
     pub fn addRequestTask(self: *@This(), key: []const u8, input: c.jv, dependencies: []const []const u8) void {
         const instance = self.arena.create(RequestTask) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when creating Request task: \"{s}\"", .{key}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when creating Request task: \"{s}\"", .{ .task = key }),
         };
         const task_ptr = self.gpa.create(Task) catch |err| switch (err) {
-            error.OutOfMemory => exit.unexpectedly("Out of memory when creating Request task interface: \"{s}\"", .{key}),
+            error.OutOfMemory => exit.unexpectedly(err, "Occured when creating Request task interface: \"{s}\"", .{ .task = key }),
         };
         task_ptr.* = instance.task(input);
         self.addTask(key, task_ptr, dependencies);
     }
 
     pub fn run(self: *@This()) void {
-        if (!self.init_task.isAcyclic()) exit.expectedly("Dependency loop detected between tasks", .{});
+        if (!self.init_task.isAcyclic()) exit.expectedly(error.DependencyLoopDetected, "Dependency loop detected between tasks", .{});
 
         self.group = .init;
         defer self.group.cancel(self.io);
@@ -390,7 +402,7 @@ const Scheduler = struct {
         self.group.await(self.io) catch |err| {
             self.group.cancel(self.io);
             switch (err) {
-                error.Canceled => exit.unexpectedly("Canceled while group awaits", .{}),
+                error.Canceled => exit.unexpectedly(err, "Occured while group awaits", .{}),
             }
         };
     }
