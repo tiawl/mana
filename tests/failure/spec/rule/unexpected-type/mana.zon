@@ -1,3 +1,0 @@
-.{
-    .@"get-platform" = "It should fail because of this string",
-}

@@ -1,5 +1,0 @@
-.{
-    .@"get-platform" = .{
-        .@"\It_should_fail_because_of" = "this_escaped_character",
-    },
-}

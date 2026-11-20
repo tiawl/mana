@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
     const port_option: [:0]const u8 = "-p";
     const port: [:0]const u8 = "2222";
     const dest: [:0]const u8 = "sshuser@127.0.0.1";
-    const args: []const[*c]const u8 = &.{
+    const args: []const [*c]const u8 = &.{
         ssh_client.ptr, port_option, port, dest,
     };
     _ = c.main(args.len, args.ptr);

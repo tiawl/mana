@@ -4,6 +4,7 @@ const name = @tagName(pkg.name);
 const protobuf = @import("protobuf");
 const RunProtocStep = protobuf.RunProtocStep;
 const TranslateC = @import("translate_c").Translator;
+const log = @import("src/log.zig");
 
 fn buildOptionsModule(builder: *std.Build) *std.Build.Module {
     const options = builder.addOptions();
@@ -192,9 +193,9 @@ fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, protob
     });
 }
 
-fn buildManaModule(builder: *std.Build, docker_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
-    return builder.addModule("mana", .{
-        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "mana.zig" })),
+fn buildSyncModule(builder: *std.Build, docker_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
+    return builder.createModule(.{
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "sync.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
@@ -213,40 +214,46 @@ fn buildLogModule(builder: *std.Build) *std.Build.Module {
     });
 }
 
-fn buildSchedulerModule(builder: *std.Build, mana_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildSchedulerModule(builder: *std.Build, sync_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "scheduler.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
-            .{ .name = "mana", .module = mana_mod },
+            .{ .name = "sync", .module = sync_mod },
             .{ .name = "jq", .module = jq_mod },
             .{ .name = "log", .module = log_mod },
         },
     });
 }
 
-fn buildSpecModule(builder: *std.Build, options_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildScriptModule(builder: *std.Build, options_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+    const zlua_dep = builder.dependency("zlua", .{
+        .target = builder.graph.host,
+        .optimize = .debug,
+        .lang = .lua55,
+    });
     return builder.createModule(.{
-        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "spec.zig" })),
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "script.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "scheduler", .module = scheduler_mod },
-            .{ .name = "jq", .module = jq_mod },
             .{ .name = "build", .module = options_mod },
             .{ .name = "log", .module = log_mod },
+            .{ .name = "zlua", .module = zlua_dep.module("zlua") },
+            .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildMainModule(builder: *std.Build, options_mod: *std.Build.Module, spec_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildManaModule(builder: *std.Build, options_mod: *std.Build.Module, script_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
-        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "main.zig" })),
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "mana.zig" })),
         .target = builder.graph.host,
         .optimize = .debug,
         .imports = &.{
-            .{ .name = "spec", .module = spec_mod },
+            .{ .name = "script", .module = script_mod },
             .{ .name = "build", .module = options_mod },
             .{ .name = "log", .module = log_mod },
         },
@@ -260,15 +267,15 @@ fn buildManaExecutable(builder: *std.Build) !struct { *std.Build.Step.Compile, *
     const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder, protobuf_dep, protobuf_mod);
     const jq_mod = try buildJQModule(builder);
     const docker_mod = buildDockerModule(builder, options_mod, protobuf_mod, buildkit_mod, jq_mod);
-    const mana_mod = buildManaModule(builder, docker_mod, jq_mod);
+    const sync_mod = buildSyncModule(builder, docker_mod, jq_mod);
     const log_mod = buildLogModule(builder);
-    const scheduler_mod = buildSchedulerModule(builder, mana_mod, jq_mod, log_mod);
-    const spec_mod = buildSpecModule(builder, options_mod, scheduler_mod, jq_mod, log_mod);
-    const main_mod = buildMainModule(builder, options_mod, spec_mod, log_mod);
+    const scheduler_mod = buildSchedulerModule(builder, sync_mod, jq_mod, log_mod);
+    const script_mod = buildScriptModule(builder, options_mod, scheduler_mod, jq_mod, log_mod);
+    const mana_mod = buildManaModule(builder, options_mod, script_mod, log_mod);
 
     var mana_exe = builder.addExecutable(.{
         .name = "mana",
-        .root_module = main_mod,
+        .root_module = mana_mod,
     });
 
     mana_exe.step.dependOn(protobuf_compiler.step);
@@ -290,7 +297,8 @@ const TestEnvironment = struct {
 
 const TestOptions = struct {
     args: []const []const u8,
-    stderr: ?[]const u8 = null,
+    stderrEqual: ?[]const u8 = null,
+    stderrMatch: ?[]const u8 = null,
     err: ?[]const u8 = null,
     runs: []const TestEnvironment,
 };
@@ -298,7 +306,7 @@ const TestOptions = struct {
 fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, options_zon: []const u8) !void {
     const test_dir = std.fs.path.dirname(options_zon).?;
     var it = std.fs.path.componentIterator(test_dir);
-    const result = it.first().?.name;
+    const exit_code = it.first().?.name;
     const options_source = try tests_dir.readFileAllocOptions(builder.graph.io, options_zon, builder.graph.arena, .unlimited, .of(u8), 0);
     var diag: std.zon.parse.Diagnostics = undefined;
     const options = try std.zon.parse.fromSlice(TestOptions, .{
@@ -312,12 +320,17 @@ fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *s
         mana.has_side_effects = true;
         mana.addArgs(options.args);
         mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", test_dir })));
-        if (std.mem.eql(u8, result, "success")) {
-            mana.expectExitCode(0);
-            mana.expectStdErrEqual(builder.fmt("{s}\n", .{options.stderr.?}));
-        } else if (std.mem.eql(u8, result, "failure")) {
-            mana.expectExitCode(1);
+        mana.expectExitCode(@backingInt(std.meta.stringToEnum(log.ExitCode, exit_code) orelse unreachable));
+        if (std.mem.eql(u8, exit_code, "ok")) {
+            if (options.stderrEqual) |stderr| {
+                mana.expectStdErrEqual(builder.fmt("{s}\n", .{stderr}));
+            } else if (options.stderrMatch) |stderr| {
+                mana.expectStdErrMatch(builder.fmt("{s}\n", .{stderr}));
+            } else unreachable;
+        } else if (std.mem.eql(u8, exit_code, "err")) {
             mana.expectStdErrMatch(builder.fmt("    .id = .{s},", .{options.err.?}));
+        } else if (std.mem.eql(u8, exit_code, "info")) {
+            _ = mana.captureStdErr(.{});
         } else unreachable;
         test_step.dependOn(&mana.step);
         inline for (@typeInfo(TestEnvironment).@"struct".field_names) |field_name| {

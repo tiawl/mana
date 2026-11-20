@@ -1,5 +1,0 @@
-.{
-    .@"build-base" = .{
-        .@"docker-build/base" = "It should fail because of this string",
-    },
-}

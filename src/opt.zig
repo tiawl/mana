@@ -191,7 +191,9 @@ pub const OptionsParser = struct {
     gpa: std.mem.Allocator,
     help: bool,
     version: bool,
-    rule: ?[]const u8,
+    rule: []const u8,
+    rule_catched: bool,
+    args: std.ArrayList([]const u8),
 
     pub fn init(arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator) @This() {
         return .{
@@ -199,12 +201,16 @@ pub const OptionsParser = struct {
             .gpa = gpa,
             .help = false,
             .version = false,
-            .rule = null,
+            .rule = "",
+            .rule_catched = false,
+            .args = .empty,
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        if (self.rule) |rule| self.gpa.free(rule);
+        if (self.rule.len > 0) self.gpa.free(self.rule);
+        for (0..self.args.items.len) |i| self.gpa.free(self.args.items[i]);
+        self.args.deinit(self.gpa);
     }
 
     fn needHelp(self: *@This()) void {
@@ -226,19 +232,25 @@ pub const OptionsParser = struct {
         _ = it.next();
         while (it.next()) |arg_z| {
             const arg = std.mem.span(arg_z.ptr);
-            if (isUsed(.help, arg_z)) {
-                self.needHelp();
-            } else if (isUsed(.version, arg_z)) {
-                self.needVersion();
-            } else {
-                if (self.rule != null) log.err(error.UniqueRule, "You can't run 2 rules", .{
-                    .first_rule = self.rule,
-                    .second_rule = arg,
-                });
-                self.rule = self.gpa.dupe(u8, arg) catch |err| switch (err) {
-                    error.OutOfMemory => log.fatal(err, "Occured when duping rule name", .{ .arg = arg }),
-                };
+
+            if (self.rule.len == 0) {
+                if (isUsed(.help, arg_z)) {
+                    self.needHelp();
+                    continue;
+                } else if (isUsed(.version, arg_z)) {
+                    self.needVersion();
+                    continue;
+                }
             }
+
+            if (self.help or self.version) continue;
+
+            if (!self.rule_catched) {
+                self.rule = self.gpa.dupe(u8, arg) catch |err| log.fatal(err, "Occured when duping rule name", .{ .arg = arg });
+                self.rule_catched = true;
+                continue;
+            }
+            self.args.append(self.gpa, self.gpa.dupe(u8, arg) catch |err| log.fatal(err, "Occured when duping rule argument", .{ .arg = arg })) catch |err| log.fatal(err, "Occured when appending rule argument", .{ .arg = arg, .args_len = self.args.items.len });
         }
     }
 
@@ -254,7 +266,7 @@ pub const OptionsParser = struct {
             \\{s}
             \\
             \\Usage:
-            \\    {s} [options] rule
+            \\    {s} [options] rule [rule-arguments]
             \\
             \\Options:
             \\

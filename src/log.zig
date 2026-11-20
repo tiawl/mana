@@ -1,5 +1,12 @@
 const std = @import("std");
 
+pub const ExitCode = enum(@typeInfo(@TypeOf(std.process.exit)).@"fn".param_types[0].?) {
+    ok = 0,
+    err = 1,
+    fatal = 2,
+    info = 3,
+};
+
 fn init(writer: *std.Io.Writer) struct { std.zon.Serializer, std.Io.Terminal } {
     return .{
         .{
@@ -135,9 +142,9 @@ fn exit(id: anyerror, message: []const u8, details: anytype, code: u8) noreturn 
 }
 
 pub fn err(e: anyerror, comptime message: []const u8, details: anytype) noreturn {
-    exit(e, message, details, 1);
+    exit(e, message, details, @backingInt(ExitCode.err));
 }
 
 pub fn fatal(e: anyerror, comptime message: []const u8, details: anytype) noreturn {
-    exit(e, message, details, 2);
+    exit(e, message, details, @backingInt(ExitCode.fatal));
 }

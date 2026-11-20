@@ -1,0 +1,18 @@
+.{
+    .args = .{
+        "getPlatform",
+        "v1.56",
+        "/version",
+        "GET",
+        "../../../dockerfiles/base",
+    },
+    .stderrMatch =
+    \\Docker Engine - Community
+    ,
+    .runs = .{
+        .{},
+        .{
+            .DOCKER_HOST = "tcp://127.0.0.1:2375",
+        },
+    },
+}

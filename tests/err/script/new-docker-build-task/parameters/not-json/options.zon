@@ -1,0 +1,13 @@
+.{
+    .args = .{
+        "buildImageBase",
+        "../../../../../../dockerfiles/base",
+    },
+    .err = "UnexpectedJsonKind",
+    .runs = .{
+        .{},
+        .{
+            .DOCKER_HOST = "tcp://127.0.0.1:2375",
+        },
+    },
+}

@@ -129,7 +129,7 @@ pub fn Client(comptime Logger: type) type {
         verbose: bool,
 
         pub const SendError = SendInnerError;
-        pub const SendBuildError = SendInnerError || WriteCtxArchiveError || std.Io.Dir.StatFileError;
+        pub const SendBuildError = SendInnerError || WriteCtxArchiveError || std.Io.Dir.StatFileError || error{ UnexpectedInputJsonKind, MissingVersion, UnexpectedVersionJsonKind, MissingCtx, UnexpectedCtxJsonKind, MissingT, UnexpectedTJsonKind, CtxIsNotDir, UnexpectedParametersJsonKind };
 
         pub fn init(arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) @This() {
             var self: @This() = .{
@@ -326,24 +326,32 @@ pub fn Client(comptime Logger: type) type {
             });
         }
 
-        const SendInnerError = std.Io.Cancelable || ConnectError || std.Io.Writer.Error || std.Uri.ParseError || std.http.Client.RequestError || std.mem.Allocator.Error || std.http.Client.Request.ReceiveHeadError || error{UnsupportedCompressionMethod} || error{WriteFailed} || Response.Interface.ProcessError;
+        const SendInnerError = std.Io.Cancelable || ConnectError || std.Io.Writer.Error || std.Uri.ParseError || std.http.Client.RequestError || std.mem.Allocator.Error || std.http.Client.Request.ReceiveHeadError || error{ UnexpectedInputJsonKind, MissingVersion, UnexpectedVersionJsonKind, MissingEndpoint, UnexpectedEndpointJsonKind, MissingMethod, UnexpectedMethodJsonKind, UnknownHttpMethod, UnexpectedParametersJsonKind, UnknownDockerApiVersion, UnsupportedCompressionMethod } || error{WriteFailed} || Response.Interface.ProcessError;
 
         fn sendInner(self: *@This(), response: *const Response.Interface, req_body: *const c.jv) SendInnerError!c.jv {
-            std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+            if (c.jv_get_kind(req_body.*) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) != @intFromBool(true)) return error.MissingVersion;
             const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
             defer c.jv_free(version_jv);
-            std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("endpoint")) == @intFromBool(true));
+            if (c.jv_get_kind(version_jv) != c.JV_KIND_STRING) return error.UnexpectedVersionJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("endpoint")) != @intFromBool(true)) return error.MissingEndpoint;
             const endpoint_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("endpoint"));
             defer c.jv_free(endpoint_jv);
-            std.debug.assert(c.jv_get_kind(endpoint_jv) == c.JV_KIND_STRING);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("method")) == @intFromBool(true));
+            if (c.jv_get_kind(endpoint_jv) != c.JV_KIND_STRING) return error.UnexpectedEndpointJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("method")) != @intFromBool(true)) return error.MissingMethod;
             const method_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("method"));
             defer c.jv_free(method_jv);
-            std.debug.assert(c.jv_get_kind(method_jv) == c.JV_KIND_STRING);
+            if (c.jv_get_kind(method_jv) != c.JV_KIND_STRING) return error.UnexpectedMethodJsonKind;
             const method = std.mem.span(c.jv_string_value(method_jv));
-            std.debug.assert(std.meta.stringToEnum(std.http.Method, method) != null);
+            if (std.meta.stringToEnum(std.http.Method, method) == null) return error.UnknownHttpMethod;
+            const has_parameters = c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true);
+            if (has_parameters and c.jv_get_kind(c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters"))) != c.JV_KIND_OBJECT) return error.UnexpectedParametersJsonKind;
+
+            const version = std.mem.span(c.jv_string_value(version_jv));
+            if (!std.mem.startsWith(u8, version, "v")) return error.UnknownDockerApiVersion;
+            const sem_version_str = try self.gpa.print("{s}.0", .{version[1..]});
+            defer self.gpa.free(sem_version_str);
+            _ = std.SemanticVersion.parse(sem_version_str) catch return error.UnknownDockerApiVersion;
 
             try self.mutex.lock(self.http_client.io);
             defer self.mutex.unlock(self.http_client.io);
@@ -355,10 +363,10 @@ pub fn Client(comptime Logger: type) type {
             defer url.deinit();
 
             try url.writer.writeAll("http://");
-            try url.writer.writeAll(std.mem.span(c.jv_string_value(version_jv)));
+            try url.writer.writeAll(version);
             try url.writer.writeAll(std.mem.span(c.jv_string_value(endpoint_jv)));
 
-            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
+            if (has_parameters) {
                 const parameters = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters"));
                 defer c.jv_free(parameters);
                 var it = c.jv_object_iter(parameters);
@@ -491,23 +499,25 @@ pub fn Client(comptime Logger: type) type {
         }
 
         pub fn sendBuild(self: *@This(), req_body: *const c.jv) SendBuildError!c.jv {
-            std.debug.assert(c.jv_get_kind(req_body.*) == c.JV_KIND_OBJECT);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("ctx")) == @intFromBool(true));
-            const ctx_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("ctx"));
-            defer c.jv_free(ctx_jv);
-            std.debug.assert(c.jv_get_kind(ctx_jv) == c.JV_KIND_STRING);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) == @intFromBool(true));
+            if (c.jv_get_kind(req_body.*) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) != @intFromBool(true)) return error.MissingVersion;
             const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
             defer c.jv_free(version_jv);
-            std.debug.assert(c.jv_get_kind(version_jv) == c.JV_KIND_STRING);
-            std.debug.assert(c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("t")) == @intFromBool(true));
+            if (c.jv_get_kind(version_jv) != c.JV_KIND_STRING) return error.UnexpectedVersionJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("ctx")) != @intFromBool(true)) return error.MissingCtx;
+            const ctx_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("ctx"));
+            defer c.jv_free(ctx_jv);
+            if (c.jv_get_kind(ctx_jv) != c.JV_KIND_STRING) return error.UnexpectedCtxJsonKind;
+            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("t")) != @intFromBool(true)) return error.MissingT;
             const t_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("t"));
             defer c.jv_free(t_jv);
-            std.debug.assert(c.jv_get_kind(t_jv) == c.JV_KIND_STRING);
+            if (c.jv_get_kind(t_jv) != c.JV_KIND_STRING) return error.UnexpectedTJsonKind;
             const cwd = std.Io.Dir.cwd();
             const ctx = std.mem.span(c.jv_string_value(ctx_jv));
             const stat = try cwd.statFile(self.http_client.io, ctx, .{});
-            std.debug.assert(stat.kind == .directory);
+            if (stat.kind != .directory) return error.CtxIsNotDir;
+            const has_parameters = c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true);
+            if (has_parameters and c.jv_get_kind(c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters"))) != c.JV_KIND_OBJECT) return error.UnexpectedParametersJsonKind;
 
             var archive_buf: std.Io.Writer.Allocating = .init(self.gpa);
             defer archive_buf.deinit();
@@ -516,9 +526,7 @@ pub fn Client(comptime Logger: type) type {
 
             var parameters_jv = c.jv_object();
             errdefer c.jv_free(parameters_jv);
-            if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("parameters")) == @intFromBool(true)) {
-                parameters_jv = c.jv_object_merge(parameters_jv, c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters")));
-            }
+            if (has_parameters) parameters_jv = c.jv_object_merge(parameters_jv, c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("parameters")));
             parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("version"), c.jv_number(2));
             parameters_jv = c.jv_object_set(parameters_jv, c.jv_string("t"), c.jv_copy(t_jv));
             var req_body_jv = c.jv_object();

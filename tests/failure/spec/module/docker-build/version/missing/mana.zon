@@ -1,8 +1,0 @@
-.{
-    .@"build-base" = .{
-        .@"docker-build/base" = .{
-            .ctx = "dockerfiles/base",
-            .t = "base:latest",
-        },
-    },
-}

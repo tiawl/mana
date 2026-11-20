@@ -1,0 +1,14 @@
+.{
+    .args = .{
+        "getPlatform",
+    },
+    .stderrEqual =
+    \\Docker Engine - Community
+    ,
+    .runs = .{
+        .{},
+        .{
+            .DOCKER_HOST = "tcp://127.0.0.1:2375",
+        },
+    },
+}

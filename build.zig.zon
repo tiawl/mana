@@ -17,6 +17,10 @@
             .url = "git+https://github.com/jqlang/jq#5c001b18d7237cce1fdba63608732163f978dd23",
             .hash = "N-V-__8AAMqzSQBPbXoVRGn4q6E7ItEbm6MgCq1Ih_rk7JrW",
         },
+        .zlua = .{
+            .url = "git+https://github.com/tiawl-forks/ziglua#51a037ef301c89bf5abf6ef41e26a9f4978bf535",
+            .hash = "zlua-0.1.0-hGRpC2qrBQCWA32ezjk549WeRmKav2mdXvJxBsAPqcDs",
+        },
     },
     .paths = .{
         "build.zig",

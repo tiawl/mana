@@ -1,24 +1,24 @@
-Think more about it:
-- split InitTask into GroupTask + CallTask ??
-- add ReadZonTask + IncludeTask ?
-- add ConditionalTask ?
-- inventory ??
-- add CommandTask for ssh ?
-
-Go for it:
-- write tests for warning
-- return err if rule name:
-  - contains whitespace
-  - starts with dash
-- make docker.Client a singleton
-- add oniguruma for jq
-- build.zig: replace .debug optimize everywhere with user optimize
-- add verbose mode: options + more debug
-- add the possibility to send arguments to a rule
-- add the possibility to use .{.jq = ".my.filter"} anywhere => potentially rewrite Spec to manage jv objects instead of Zig objects
-- rule scope: public or private
-- hash the key into Scheduler.addTask()
-- add plugin system for custom tasks/modules:
+- quick-wins:
+  - write tests for warning
+  - make docker.Client a singleton
+  - add oniguruma for jq
+  - build.zig: replace .debug optimize everywhere with user optimize
+  - add log level:
+    - add more debug and informations
+    - configure hook
+- features:
+  - add custom task to resolve this kind of usecase: how to run a for loop on a docker get containers output ?
+    - look this: https://stackoverflow.com/questions/4928973/how-do-you-pass-a-lua-function-to-a-c-function-and-execute-the-lua-function-seve
+    - the Lua function has a table parameter with all executed task output
+    - check makeFn and custom step for old version of Zig Compiler
+    - all Scheduler:* will return fatal into custom task Lua function
+    - add direct access to docker request and json query functions only into custom task Lua function that will fatal when used into 'build:' context
+  - add plugin system for custom tasks/modules:
     - see how zig fetch and manage dependencies
-    - use https://github.com/natecraddock/ziglua or write a custom lua C API binding
-    - use https://github.com/nmap/nmap/blob/9faa841afd45103cf190f13f67320f28a4623f0b/nselib/libssh2-utility.lua in lua script for ssh client
+    - lua load hook
+    - merge plugins build.zig with mana build.zig
+  - make jq a plugin
+  - test plugins:
+    - jq
+    - ssh
+  - add a way to defer tasks into lua
