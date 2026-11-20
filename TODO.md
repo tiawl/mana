@@ -8,11 +8,9 @@
     - configure hook
 - features:
   - add custom task to resolve this kind of usecase: how to run a for loop on a docker get containers output ?
-    - look this: https://stackoverflow.com/questions/4928973/how-do-you-pass-a-lua-function-to-a-c-function-and-execute-the-lua-function-seve
-    - the Lua function has a table parameter with all executed task output
-    - check makeFn and custom step for old version of Zig Compiler
     - all Scheduler:* will return fatal into custom task Lua function
     - add direct access to docker request and json query functions only into custom task Lua function that will fatal when used into 'build:' context
+  - add userdata parameter to custom tasks
   - add plugin system for custom tasks/modules:
     - see how zig fetch and manage dependencies
     - lua load hook

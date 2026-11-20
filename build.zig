@@ -214,7 +214,16 @@ fn buildLogModule(builder: *std.Build) *std.Build.Module {
     });
 }
 
-fn buildSchedulerModule(builder: *std.Build, sync_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildZluaModule(builder: *std.Build) *std.Build.Module {
+    const zlua_dep = builder.dependency("zlua", .{
+        .target = builder.graph.host,
+        .optimize = .debug,
+        .lang = .lua55,
+    });
+    return zlua_dep.module("zlua");
+}
+
+fn buildSchedulerModule(builder: *std.Build, sync_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "scheduler.zig" })),
         .target = builder.graph.host,
@@ -222,17 +231,13 @@ fn buildSchedulerModule(builder: *std.Build, sync_mod: *std.Build.Module, jq_mod
         .imports = &.{
             .{ .name = "sync", .module = sync_mod },
             .{ .name = "jq", .module = jq_mod },
+            .{ .name = "zlua", .module = zlua_mod },
             .{ .name = "log", .module = log_mod },
         },
     });
 }
 
-fn buildScriptModule(builder: *std.Build, options_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
-    const zlua_dep = builder.dependency("zlua", .{
-        .target = builder.graph.host,
-        .optimize = .debug,
-        .lang = .lua55,
-    });
+fn buildScriptModule(builder: *std.Build, options_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "script.zig" })),
         .target = builder.graph.host,
@@ -241,7 +246,7 @@ fn buildScriptModule(builder: *std.Build, options_mod: *std.Build.Module, schedu
             .{ .name = "scheduler", .module = scheduler_mod },
             .{ .name = "build", .module = options_mod },
             .{ .name = "log", .module = log_mod },
-            .{ .name = "zlua", .module = zlua_dep.module("zlua") },
+            .{ .name = "zlua", .module = zlua_mod },
             .{ .name = "jq", .module = jq_mod },
         },
     });
@@ -269,8 +274,9 @@ fn buildManaExecutable(builder: *std.Build) !struct { *std.Build.Step.Compile, *
     const docker_mod = buildDockerModule(builder, options_mod, protobuf_mod, buildkit_mod, jq_mod);
     const sync_mod = buildSyncModule(builder, docker_mod, jq_mod);
     const log_mod = buildLogModule(builder);
-    const scheduler_mod = buildSchedulerModule(builder, sync_mod, jq_mod, log_mod);
-    const script_mod = buildScriptModule(builder, options_mod, scheduler_mod, jq_mod, log_mod);
+    const zlua_mod = buildZluaModule(builder);
+    const scheduler_mod = buildSchedulerModule(builder, sync_mod, jq_mod, zlua_mod, log_mod);
+    const script_mod = buildScriptModule(builder, options_mod, scheduler_mod, jq_mod, zlua_mod, log_mod);
     const mana_mod = buildManaModule(builder, options_mod, script_mod, log_mod);
 
     var mana_exe = builder.addExecutable(.{

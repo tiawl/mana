@@ -26,25 +26,25 @@ pub fn run() void {
 }
 
 fn schedulerTaskDependsOn(vm: *zlua.Lua) i32 {
-    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Child argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
-    const child_id = vm.toString(1) catch |err| log.fatal(err, "Can't find child argument in lua VM stack", @src());
-    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Parent argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(2) });
-    const parent_id = vm.toString(2) catch |err| log.fatal(err, "Can't find parent argument in lua VM stack", @src());
+    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Child argument should be a string in main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
+    const child_id = vm.toString(1) catch |err| log.fatal(err, "Occured when popping child argument in main Lua VM stack", @src());
+    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Parent argument should be a string in main Lua VM stack", .{ .src = @src(), .id = child_id, .lua_type = vm.typeOf(2) });
+    const parent_id = vm.toString(2) catch |err| log.fatal(err, "Occured when popping parent argument in main Lua VM stack", .{ .src = @src(), .id = child_id });
     scheduler.taskDependsOn(child_id, parent_id);
     return 0;
 }
 
 fn schedulerNewDockerTask(vm: *zlua.Lua) i32 {
-    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "New task argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
-    const new_task_id = vm.toString(1) catch |err| log.fatal(err, "Can't find new task argument in lua VM stack", @src());
-    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Docker API version argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(2) });
-    const api_version = vm.toString(2) catch |err| log.fatal(err, "Can't find Docker API version argument in lua VM stack", @src());
-    if (vm.typeOf(3) != .string) log.err(error.ExpectedString, "Docker endpoint argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(3) });
-    const endpoint = vm.toString(3) catch |err| log.fatal(err, "Can't find Docker endpoint argument in lua VM stack", @src());
-    if (vm.typeOf(4) != .string) log.err(error.ExpectedString, "HTTP method argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(4) });
-    const method = vm.toString(4) catch |err| log.fatal(err, "Can't find HTTP method argument in lua VM stack", @src());
-    if (vm.typeOf(5) != .string) log.err(error.ExpectedString, "Parameters argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(5) });
-    const parameters = vm.toString(5) catch |err| log.fatal(err, "Can't find parameters argument in lua VM stack", @src());
+    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Task id argument should be a string in main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
+    const task_id = vm.toString(1) catch |err| log.fatal(err, "Occured when popping task id argument in main Lua VM stack", @src());
+    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Docker API version argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(2) });
+    const api_version = vm.toString(2) catch |err| log.fatal(err, "Occured when popping Docker API version argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(3) != .string) log.err(error.ExpectedString, "Docker endpoint argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(3) });
+    const endpoint = vm.toString(3) catch |err| log.fatal(err, "Occured when popping Docker endpoint argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(4) != .string) log.err(error.ExpectedString, "HTTP method argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(4) });
+    const method = vm.toString(4) catch |err| log.fatal(err, "Occured when popping HTTP method argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(5) != .string) log.err(error.ExpectedString, "Parameters argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(5) });
+    const parameters = vm.toString(5) catch |err| log.fatal(err, "Occured when popping parameters argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
     const gpa = vm.allocator();
     const source = gpa.printSentinel(
         \\{{
@@ -55,25 +55,25 @@ fn schedulerNewDockerTask(vm: *zlua.Lua) i32 {
         \\        "parameters": {s}
         \\    }}
         \\}}
-    , .{ api_version, endpoint, method, parameters }, 0) catch |err| log.fatal(err, @src().fn_name ++ "(): Occured when allocating for string", .{});
+    , .{ api_version, endpoint, method, parameters }, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .src = @src(), .id = task_id });
     defer gpa.free(source);
     const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.err(error.UnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    scheduler.newRequestTask(new_task_id, parsed);
+    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.err(error.UnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .id = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+    scheduler.newRequestTask(task_id, parsed);
     return 0;
 }
 
 fn schedulerNewDockerBuildTask(vm: *zlua.Lua) i32 {
-    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "New task argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
-    const new_task_id = vm.toString(1) catch |err| log.fatal(err, "Can't find new task argument in lua VM stack", @src());
-    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Docker API version argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(2) });
-    const api_version = vm.toString(2) catch |err| log.fatal(err, "Can't find Docker API version argument in lua VM stack", @src());
-    if (vm.typeOf(3) != .string) log.err(error.ExpectedString, "Context argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(3) });
-    const ctx = vm.toString(3) catch |err| log.fatal(err, "Can't find context argument in lua VM stack", @src());
-    if (vm.typeOf(4) != .string) log.err(error.ExpectedString, "Tag argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(4) });
-    const t = vm.toString(4) catch |err| log.fatal(err, "Can't find tag argument in lua VM stack", @src());
-    if (vm.typeOf(5) != .string) log.err(error.ExpectedString, "Parameters argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(5) });
-    const parameters = vm.toString(5) catch |err| log.fatal(err, "Can't find parameters argument in lua VM stack", @src());
+    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Task id argument should be a string in main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
+    const task_id = vm.toString(1) catch |err| log.fatal(err, "Occured when popping task id argument in main Lua VM stack", @src());
+    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Docker API version argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(2) });
+    const api_version = vm.toString(2) catch |err| log.fatal(err, "Occured when popping Docker API version argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(3) != .string) log.err(error.ExpectedString, "Context argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(3) });
+    const ctx = vm.toString(3) catch |err| log.fatal(err, "Occured when popping context argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(4) != .string) log.err(error.ExpectedString, "Tag argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(4) });
+    const t = vm.toString(4) catch |err| log.fatal(err, "Occured when popping tag argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    if (vm.typeOf(5) != .string) log.err(error.ExpectedString, "Parameters argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(5) });
+    const parameters = vm.toString(5) catch |err| log.fatal(err, "Occured when popping parameters argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
     const gpa = vm.allocator();
     const source = gpa.printSentinel(
         \\{{
@@ -84,20 +84,38 @@ fn schedulerNewDockerBuildTask(vm: *zlua.Lua) i32 {
         \\        "parameters": {s}
         \\    }}
         \\}}
-    , .{ api_version, ctx, t, parameters }, 0) catch |err| log.fatal(err, @src().fn_name ++ "(): Occured when allocating for string", .{});
+    , .{ api_version, ctx, t, parameters }, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .src = @src(), .id = task_id });
     defer gpa.free(source);
     const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.err(error.UnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    scheduler.newRequestTask(new_task_id, parsed);
+    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.err(error.UnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .id = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+    scheduler.newRequestTask(task_id, parsed);
+    return 0;
+}
+
+// TODO: here we should run the full user config instead of just the custom task function
+fn schedulerNewCustomTask(vm: *zlua.Lua) i32 {
+    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Task id argument should be a string in main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
+    const task_id = vm.toString(1) catch |err| log.fatal(err, "Occured when popping task id argument in main Lua VM stack", @src());
+    if (vm.typeOf(2) != .function) log.err(error.ExpectedFunction, "Second argument should be a function in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(1) });
+
+    _ = vm.getGlobal("string");
+    _ = vm.getField(-1, "dump");
+    vm.remove(-2); // remove "string" table
+    vm.pushValue(2); // push the function
+    vm.protectedCall(.{ .args = 1, .results = 1 }) catch |err| log.fatal(err, "Occured when dumping bytecode for custom task in main Lua VM stack", .{ .src = @src(), .id = task_id });
+
+    const bytecode = vm.toString(-1) catch |err| log.fatal(err, "Occured when popping string return value in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    scheduler.newCustomTask(task_id, bytecode);
+    vm.pop(1);
     return 0;
 }
 
 fn schedulerNewJSONQueryTask(vm: *zlua.Lua) i32 {
-    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "New task argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
-    const new_task_id = vm.toString(1) catch |err| log.fatal(err, @src().fn_name ++ "(): can't find new task argument in lua VM stack", .{});
-    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Filter argument should be a string in lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(2) });
-    const filter = vm.toString(2) catch |err| log.fatal(err, @src().fn_name ++ "(): can't find filter argument in lua VM stack", .{});
-    scheduler.newJSONQueryTask(new_task_id, filter);
+    if (vm.typeOf(1) != .string) log.err(error.ExpectedString, "Task id argument should be a string in main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(1) });
+    const task_id = vm.toString(1) catch |err| log.fatal(err, "Occured when poping task id argument in main Lua VM stack", @src());
+    if (vm.typeOf(2) != .string) log.err(error.ExpectedString, "Filter argument should be a string in main Lua VM stack", .{ .src = @src(), .id = task_id, .lua_type = vm.typeOf(2) });
+    const filter = vm.toString(2) catch |err| log.fatal(err, "Occured when popping filter argument in main Lua VM stack", .{ .src = @src(), .id = task_id });
+    scheduler.newJSONQueryTask(task_id, filter);
     return 0;
 }
 
@@ -112,7 +130,7 @@ const Script = struct {
         self.arena = arena_instance;
         self.gpa = gpa;
         self.io = io;
-        self.vm = zlua.Lua.init(gpa) catch |err| log.fatal(err, "Occured when initializing lua VM", .{});
+        self.vm = zlua.Lua.init(gpa) catch |err| log.fatal(err, "Occured when initializing main Lua VM", .{});
         self.vm.openLibs();
     }
 
@@ -121,7 +139,7 @@ const Script = struct {
         scheduler.deinit();
     }
 
-    const build_header_script =
+    const build_context_script =
         \\build = {}
         \\build.__index = build
         \\
@@ -130,25 +148,6 @@ const Script = struct {
         \\   setmetatable(b, build)
         \\   b.argv = argv
         \\   return b
-        \\end
-        \\
-        \\Scheduler = {}
-        \\Scheduler.__index = Scheduler
-        \\
-        \\function Scheduler:taskDependsOn(child, parent)
-        \\   schedulerTaskDependsOn(child, parent);
-        \\end
-        \\
-        \\function Scheduler:newDockerTask(id, version, endpoint, method, parameters)
-        \\   schedulerNewDockerTask(id, version, endpoint, method, parameters);
-        \\end
-        \\
-        \\function Scheduler:newDockerBuildTask(id, version, ctx, t, parameters)
-        \\   schedulerNewDockerBuildTask(id, version, ctx, t, parameters)
-        \\end
-        \\
-        \\function Scheduler:newJsonQueryTask(id, filter)
-        \\   schedulerNewJsonQueryTask(id, filter)
         \\end
     ;
 
@@ -171,19 +170,21 @@ const Script = struct {
         , .{rule}) catch |err| log.fatal(err, "Occured when formatting calling script", .{});
         defer self.gpa.free(call_script);
 
-        const build_script = std.mem.joinZ(self.gpa, "\n", &.{ build_header_script, user_config_script, call_script }) catch |err| log.fatal(err, "Occured when gathering scripts into build Lua script", .{});
+        const build_script = std.mem.joinZ(self.gpa, "\n", &.{ build_context_script, user_config_script, call_script }) catch |err| log.fatal(err, "Occured when gathering scripts into build Lua script", .{});
         defer self.gpa.free(build_script);
 
-        self.vm.pushAny(args) catch |err| log.fatal(err, "Occured when pushing args to Lua VM stack", .{});
+        self.vm.pushAny(args) catch |err| log.fatal(err, "Occured when pushing args to main Lua VM stack", .{});
         self.vm.setGlobal("argv");
         self.vm.pushFunction(zlua.wrap(schedulerTaskDependsOn));
-        self.vm.setGlobal("schedulerTaskDependsOn");
+        self.vm.setGlobal("taskDependsOn");
         self.vm.pushFunction(zlua.wrap(schedulerNewDockerTask));
-        self.vm.setGlobal("schedulerNewDockerTask");
+        self.vm.setGlobal("newDockerTask");
         self.vm.pushFunction(zlua.wrap(schedulerNewDockerBuildTask));
-        self.vm.setGlobal("schedulerNewDockerBuildTask");
+        self.vm.setGlobal("newDockerBuildTask");
+        self.vm.pushFunction(zlua.wrap(schedulerNewCustomTask));
+        self.vm.setGlobal("newCustomTask");
         self.vm.pushFunction(zlua.wrap(schedulerNewJSONQueryTask));
-        self.vm.setGlobal("schedulerNewJsonQueryTask");
+        self.vm.setGlobal("newJsonQueryTask");
 
         self.vm.doString(build_script) catch |err| {
             const msg = if (self.vm.getTop() > 0) self.vm.toString(-1) catch "Unknown error" else "Unknown error";

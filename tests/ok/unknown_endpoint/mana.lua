@@ -1,5 +1,5 @@
 function build:getPlatform()
-    Scheduler:newDockerTask("get_docker_version", "v1.56", "/unknown", "GET", "{}")
-    Scheduler:newJsonQueryTask("get_platform", ".get_docker_version[0] | stderr")
-    Scheduler:taskDependsOn("get_platform", "get_docker_version")
+    newDockerTask("get_docker_version", "v1.56", "/unknown", "GET", "{}")
+    newJsonQueryTask("get_platform", ".get_docker_version[0] | stderr")
+    taskDependsOn("get_platform", "get_docker_version")
 end

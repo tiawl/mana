@@ -1,4 +1,5 @@
 const std = @import("std");
+const zlua = @import("zlua");
 const log = @import("log");
 const sync = @import("sync").Sync(log.Logger);
 const c = @import("jq");
@@ -17,92 +18,183 @@ pub fn taskDependsOn(child_id: []const u8, parent_id: []const u8) void {
     singleton.taskDependsOn(child_id, parent_id);
 }
 
-pub fn newJSONQueryTask(key: []const u8, filter: []const u8) void {
-    singleton.newJSONQueryTask(key, filter);
+pub fn newJSONQueryTask(id: []const u8, filter: []const u8) void {
+    singleton.newJSONQueryTask(id, filter);
 }
 
-pub fn newRequestTask(key: []const u8, input: c.jv) void {
-    singleton.newRequestTask(key, input);
+pub fn newRequestTask(id: []const u8, input: c.jv) void {
+    singleton.newRequestTask(id, input);
+}
+
+pub fn newCustomTask(id: []const u8, bytecode: []const u8) void {
+    singleton.newCustomTask(id, bytecode);
 }
 
 pub fn run() void {
     singleton.run();
 }
 
-const JSONQueryTask = struct {
+const CustomTask = struct {
+    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
-    filter: []const u8,
-    inputs: *const std.StringHashMap(*Task),
-    output: c.jv,
+    id: [:0]const u8,
+    bytecode: []const u8,
+    tasks: *const std.StringHashMap(*Task),
+    output: std.json.Value,
 
-    pub fn task(self: *@This(), gpa: std.mem.Allocator, filter: []const u8, inputs: *const std.StringHashMap(*Task)) std.mem.Allocator.Error!Task {
+    pub fn task(self: *@This(), arena: std.mem.Allocator, gpa: std.mem.Allocator, id: []const u8, bytecode: []const u8, tasks: *const std.StringHashMap(*Task)) std.mem.Allocator.Error!Task {
+        self.arena = arena;
         self.gpa = gpa;
-        self.filter = try self.gpa.dupe(u8, filter);
-        self.inputs = inputs;
-        self.output = c.jv_null();
+        self.id = try self.gpa.dupeSentinel(u8, id, 0);
+        errdefer self.gpa.free(self.id);
+        self.bytecode = try self.gpa.dupe(u8, bytecode);
+        errdefer self.gpa.free(self.bytecode);
+        self.tasks = tasks;
+        self.output = .{ .@"null" = {} };
         return .implement(@This(), self);
     }
 
     pub fn deinit(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        c.jv_free(self.output);
+        self.gpa.free(self.id);
+        self.gpa.free(self.bytecode);
+    }
+
+    // TODO test custom with:
+    // - no input
+    // - more than 1 input
+    // - a key for task executed after
+    pub fn run(ptr: *anyopaque) void {
+        var self: *@This() = @ptrCast(@alignCast(ptr));
+
+        var vm = zlua.Lua.init(self.gpa) catch |err| log.fatal(err, "Occured when initializing thread Lua VM", .{ .id = self.id });
+        defer vm.deinit();
+        vm.openLibs();
+
+        vm.loadBuffer(self.bytecode, self.id, .binary) catch |err| log.fatal(err, "Occured when loading bytecode into thread Lua VM", .{ .id = self.id });
+
+        vm.newTable();
+        const table = vm.getTop();
+        var it = self.tasks.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.finished.load(.acquire)) {
+                if (entry.value_ptr.*.getOutput()) |output| {
+                    _ = vm.pushString(entry.key_ptr.*);
+                    const value = std.json.Stringify.valueAlloc(self.gpa, output.*, .{}) catch |err| log.fatal(err, "Occured when stringifying the json for table", .{ .id = self.id });
+                    defer self.gpa.free(value);
+                    _ = vm.pushString(value);
+                    vm.setTable(table);
+                }
+            }
+        }
+        vm.protectedCall(.{ .args = 1, .results = 1 }) catch |err| {
+            const msg = if (vm.getTop() > 0) vm.toString(-1) catch "Unknown error" else "Unknown error";
+            log.fatal(err, "Occured when running custom task", .{ .id = self.id, .msg = msg });
+        };
+        if (vm.typeOf(-1) != .string) log.err(error.ExpectedString, "Function used by a custom task should return a string", .{ .id = self.id, .lua_type = vm.typeOf(-1) });
+        const output_str = vm.toString(-1) catch |err| log.fatal(err, "Occured when popping returned value from function used by custom task in thread Lua VM stack", .{ .id = self.id });
+
+        var diag: std.json.Diagnostics = .{};
+        var scanner: std.json.Scanner = .initCompleteInput(self.gpa, output_str);
+        defer scanner.deinit();
+        scanner.enableDiagnostics(&diag);
+
+        self.output = std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
+            .ignore_unknown_fields = true
+        }) catch |err| log.err(err, "Occured when parsing the custom task output", .{ .source = output_str, .line = diag.getLine(), .column = diag.getColumn() });
+    }
+
+    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
+        const self: *const @This() = @ptrCast(@alignCast(ptr));
+        return &self.output;
+    }
+};
+
+const JSONQueryTask = struct {
+    gpa: std.mem.Allocator,
+    id: []const u8,
+    filter: []const u8,
+    inputs: *const std.StringHashMap(*Task),
+    output: std.json.Value,
+
+    pub fn task(self: *@This(), gpa: std.mem.Allocator, id: []const u8, filter: []const u8, inputs: *const std.StringHashMap(*Task)) std.mem.Allocator.Error!Task {
+        self.gpa = gpa;
+        self.id = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(self.id);
+        self.filter = try self.gpa.dupe(u8, filter);
+        errdefer self.gpa.free(self.filter);
+        self.inputs = inputs;
+        self.output = .{ .@"null" = {} };
+        return .implement(@This(), self);
+    }
+
+    pub fn deinit(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.gpa.free(self.id);
         self.gpa.free(self.filter);
+        if (std.meta.activeTag(self.output) == .array) self.output.array.deinit();
     }
 
     pub fn run(ptr: *anyopaque) void {
         var self: *@This() = @ptrCast(@alignCast(ptr));
 
-        var inputs = c.jv_object();
-        defer c.jv_free(inputs);
+        var inputs: std.json.Value = .{ .object = .empty };
+        defer inputs.object.deinit(self.gpa);
 
         var it = self.inputs.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.*.getOutput()) |output| {
-                inputs = c.jv_object_set(inputs, c.jv_string_sized(entry.key_ptr.*.ptr, @intCast(entry.key_ptr.*.len)), c.jv_copy(output.*));
+            if (entry.value_ptr.*.finished.load(.acquire)) {
+                if (entry.value_ptr.*.getOutput()) |output| {
+                    inputs.object.put(self.gpa, entry.key_ptr.*, output.*) catch |err| log.fatal(err, "Occured when putting new value to produce a JSON query", .{ .id = self.id });
+                }
             }
         }
 
-        c.jv_free(self.output);
-        self.output = sync.jsonQuery(self.filter, inputs) catch |err| switch (err) {
-            error.OutOfMemory => log.fatal(err, "Occured when trying to produce a JSON query", .{}),
-            error.IncorrectJqFilter => log.err(err, "The provided jq filter is incorrect", .{}),
-            error.JqHalted, error.JqInvalidMsg => log.err(err, "A jq error occured", .{}),
+        self.output = sync.jsonQuery(self.filter, &inputs) catch |err| switch (err) {
+            error.IncorrectJqFilter => log.err(err, "The provided jq filter is incorrect", .{ .id = self.id }),
+            error.JqHalted, error.JqInvalidMsg => log.err(err, "A jq error occured", .{ .id = self.id }),
             error.UnexpectedInputJsonKind => unreachable,
+            else => log.fatal(err, "Occured when trying to produce a JSON query", .{ .id = self.id }),
         };
     }
 
-    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
+    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
         const self: *const @This() = @ptrCast(@alignCast(ptr));
         return &self.output;
     }
 };
 
 const RequestTask = struct {
+    gpa: std.mem.Allocator,
+    id: []const u8,
     input: c.jv,
-    output: c.jv,
+    output: std.json.Value,
 
-    pub fn task(self: *@This(), input: c.jv) Task {
+    pub fn task(self: *@This(), gpa: std.mem.Allocator, id: []const u8, input: c.jv) std.mem.Allocator.Error!Task {
+        self.gpa = gpa;
+        self.id = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(self.id);
         self.input = input;
-        self.output = c.jv_null();
+        self.output = .{ .@"null" = {} };
         return .implement(@This(), self);
     }
 
     pub fn deinit(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         c.jv_free(self.input);
-        c.jv_free(self.output);
+        self.gpa.free(self.id);
+        if (std.meta.activeTag(self.output) == .array) self.output.array.deinit();
     }
 
     pub fn run(ptr: *anyopaque) void {
         var self: *@This() = @ptrCast(@alignCast(ptr));
-        c.jv_free(self.output);
         self.output = sync.sendRequestValue(self.input) catch |err| switch (err) {
-            error.UnexpectedInputJsonKind, error.UnexpectedVersionJsonKind, error.UnexpectedEndpointJsonKind, error.UnexpectedMethodJsonKind, error.MissingVersion, error.MissingEndpoint, error.MissingMethod, error.UnexpectedCtxJsonKind, error.MissingCtx, error.MissingT, error.UnexpectedTJsonKind, error.UnexpectedParametersJsonKind, error.UnknownHttpMethod, error.UnknownDockerApiVersion, error.CtxIsNotDir => log.err(err, "Occured when trying to send a request", .{}),
-            else => log.fatal(err, "Occured when trying to send a request", .{}),
+            error.UnexpectedInputJsonKind, error.UnexpectedVersionJsonKind, error.UnexpectedEndpointJsonKind, error.UnexpectedMethodJsonKind, error.MissingVersion, error.MissingEndpoint, error.MissingMethod, error.UnexpectedCtxJsonKind, error.MissingCtx, error.MissingT, error.UnexpectedTJsonKind, error.UnexpectedParametersJsonKind, error.UnknownHttpMethod, error.UnknownDockerApiVersion, error.CtxIsNotDir => log.err(err, "Occured when trying to send a request", .{ .id = self.id }),
+            else => log.fatal(err, "Occured when trying to send a request", .{ .id = self.id }),
         };
     }
 
-    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
+    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
         const self: *const @This() = @ptrCast(@alignCast(ptr));
         return &self.output;
     }
@@ -121,7 +213,7 @@ const InitTask = struct {
         _ = ptr;
     }
 
-    pub fn getOutput(ptr: *const anyopaque) ?*const c.jv {
+    pub fn getOutput(ptr: *const anyopaque) ?*const std.json.Value {
         _ = ptr;
         return null;
     }
@@ -131,7 +223,7 @@ const Task = struct {
     const VTable = struct {
         deinit_fn: *const fn (*anyopaque) void,
         run_fn: *const fn (*anyopaque) void,
-        get_output_fn: *const fn (*const anyopaque) ?*const c.jv,
+        get_output_fn: *const fn (*const anyopaque) ?*const std.json.Value,
     };
 
     ptr: *anyopaque,
@@ -145,6 +237,7 @@ const Task = struct {
     ready: std.Io.Event,
     spawned: bool,
     mutex: std.Io.Mutex,
+    finished: std.atomic.Value(bool),
 
     pub fn implement(comptime T: type, impl: *T) @This() {
         return .{
@@ -163,6 +256,7 @@ const Task = struct {
             .ready = undefined,
             .spawned = undefined,
             .mutex = undefined,
+            .finished = undefined,
         };
     }
 
@@ -172,6 +266,7 @@ const Task = struct {
         self.io = io;
         self.spawned = false;
         self.mutex = .init;
+        self.finished = .init(false);
     }
 
     pub fn deinit(self: *@This()) void {
@@ -185,7 +280,7 @@ const Task = struct {
         child.parents.append(self.gpa, self) catch |err| log.fatal(err, "Occured when appending parent dependency", .{});
     }
 
-    pub fn getOutput(self: *const @This()) ?*const c.jv {
+    pub fn getOutput(self: *const @This()) ?*const std.json.Value {
         return self.vtable.get_output_fn(self.ptr);
     }
 
@@ -240,6 +335,7 @@ const Task = struct {
         };
 
         self.vtable.run_fn(self.ptr);
+        self.finished.store(true, .release);
 
         for (self.parents.items) |parent| {
             if (parent.pending.fetchSub(1, .acq_rel) == 1) parent.ready.set(self.io);
@@ -289,29 +385,36 @@ const Scheduler = struct {
         self.tasks.get(child_id).?.dependsOn(self.tasks.get(parent_id).?);
     }
 
-    fn addTask(self: *@This(), key: []const u8, task_ptr: *Task) void {
-        if (self.tasks.contains(key)) {
+    fn addTask(self: *@This(), id: []const u8, task_ptr: *Task) void {
+        if (self.tasks.contains(id)) {
             task_ptr.deinit();
-            log.err(error.DuplicatedTaskId, "Duplicated task id", .{ .task = key });
+            log.err(error.DuplicatedTaskId, "Duplicated task id", .{ .task = id });
         }
         task_ptr.init(self.arena_instance, self.gpa, self.io);
         self.init_task.dependsOn(task_ptr);
-        const duped = self.gpa.dupe(u8, key) catch |err| log.fatal(err, "Occured when duping the task id", .{ .task = key });
-        self.tasks.put(duped, task_ptr) catch |err| log.fatal(err, "Occured when adding the task", .{ .task = key });
+        const duped = self.gpa.dupe(u8, id) catch |err| log.fatal(err, "Occured when duping the task id", .{ .task = id });
+        self.tasks.put(duped, task_ptr) catch |err| log.fatal(err, "Occured when adding the task", .{ .task = id });
     }
 
-    pub fn newJSONQueryTask(self: *@This(), key: []const u8, filter: []const u8) void {
-        const instance = self.arena.create(JSONQueryTask) catch |err| log.fatal(err, "Occured when creating JSON query task", .{ .task = key });
-        const task_ptr = self.gpa.create(Task) catch |err| log.fatal(err, "Occured when creating JSON query task interface", .{ .task = key });
-        task_ptr.* = instance.task(self.gpa, filter, &self.tasks) catch |err| log.fatal(err, "Occured when duping JSON query filter", .{ .task = key });
-        self.addTask(key, task_ptr);
+    pub fn newJSONQueryTask(self: *@This(), id: []const u8, filter: []const u8) void {
+        const instance = self.arena.create(JSONQueryTask) catch |err| log.fatal(err, "Occured when creating JSON query task", .{ .task = id });
+        const task_ptr = self.gpa.create(Task) catch |err| log.fatal(err, "Occured when creating JSON query task interface", .{ .task = id });
+        task_ptr.* = instance.task(self.gpa, id, filter, &self.tasks) catch |err| log.fatal(err, "Occured when implementing JSON query task", .{ .task = id });
+        self.addTask(id, task_ptr);
     }
 
-    pub fn newRequestTask(self: *@This(), key: []const u8, input: c.jv) void {
-        const instance = self.arena.create(RequestTask) catch |err| log.fatal(err, "Occured when creating Request task: \"{s}\"", .{ .task = key });
-        const task_ptr = self.gpa.create(Task) catch |err| log.fatal(err, "Occured when creating Request task interface: \"{s}\"", .{ .task = key });
-        task_ptr.* = instance.task(input);
-        self.addTask(key, task_ptr);
+    pub fn newRequestTask(self: *@This(), id: []const u8, input: c.jv) void {
+        const instance = self.arena.create(RequestTask) catch |err| log.fatal(err, "Occured when creating Request task: \"{s}\"", .{ .task = id });
+        const task_ptr = self.gpa.create(Task) catch |err| log.fatal(err, "Occured when creating Request task interface: \"{s}\"", .{ .task = id });
+        task_ptr.* = instance.task(self.gpa, id, input) catch |err| log.fatal(err, "Occured when implementing Request task", .{ .task = id });
+        self.addTask(id, task_ptr);
+    }
+
+    pub fn newCustomTask(self: *@This(), id: []const u8, bytecode: []const u8) void {
+        const instance = self.arena.create(CustomTask) catch |err| log.fatal(err, "Occured when creating Custom task: \"{s}\"", .{ .task = id });
+        const task_ptr = self.gpa.create(Task) catch |err| log.fatal(err, "Occured when creating Custom task interface: \"{s}\"", .{ .task = id });
+        task_ptr.* = instance.task(self.arena, self.gpa, id, bytecode, &self.tasks) catch |err| log.fatal(err, "Occured when implementing Custom task", .{ .task = id });
+        self.addTask(id, task_ptr);
     }
 
     pub fn run(self: *@This()) void {

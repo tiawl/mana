@@ -11,11 +11,13 @@ pub fn Sync(comptime Logger: type) type {
         pub const JsonQueryError = std.mem.Allocator.Error || JSONQuery.QueryError;
 
         const JSONQuery = struct {
+            arena: std.mem.Allocator,
             gpa: std.mem.Allocator,
             jq: *c.jq_state,
             filter: [:0]const u8,
 
-            pub fn init(self: *@This(), gpa: std.mem.Allocator, jq: *c.jq_state, filter: []const u8) std.mem.Allocator.Error!void {
+            pub fn init(self: *@This(), arena: std.mem.Allocator, gpa: std.mem.Allocator, jq: *c.jq_state, filter: []const u8) std.mem.Allocator.Error!void {
+                self.arena = arena;
                 self.gpa = gpa;
                 self.jq = jq;
                 self.filter = try self.gpa.dupeSentinel(u8, filter, 0);
@@ -30,18 +32,36 @@ pub fn Sync(comptime Logger: type) type {
                 JqHalted,
                 JqInvalidMsg,
                 UnexpectedInputJsonKind,
-            };
+            } || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
 
-            pub fn query(self: *@This(), inputs: c.jv) QueryError!c.jv {
-                if (c.jv_get_kind(inputs) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
+            pub fn query(self: *@This(), inputs: *const std.json.Value) QueryError!std.json.Value {
+                if (std.meta.activeTag(inputs.*) != .object) return error.UnexpectedInputJsonKind;
+                var aw: std.Io.Writer.Allocating = .init(self.gpa);
+                defer aw.deinit();
+                std.json.Stringify.value(inputs, .{}, &aw.writer) catch return error.OutOfMemory;
+                aw.writer.writeByte(0) catch return error.OutOfMemory;
+
                 if (c.jq_compile(self.jq, self.filter) != @intFromBool(true)) return error.IncorrectJqFilter;
-                c.jq_start(self.jq, c.jv_copy(inputs), 0);
-                var output = c.jv_array();
+                c.jq_start(self.jq, c.jv_parse(aw.written().ptr), 0);
+                var output: std.json.Value = .{ .array = .init(self.gpa) };
+                errdefer output.array.deinit();
                 var result = c.jq_next(self.jq);
                 defer c.jv_free(result);
 
+                var diag: std.json.Diagnostics = .{};
+                var scanner: std.json.Scanner = undefined;
                 while (c.jv_is_valid(result) == @intFromBool(true)) {
-                    output = c.jv_array_append(output, result);
+                    const dump = c.jv_dump_string(result, c.JV_KIND_INVALID);
+                    defer c.jv_free(dump);
+
+                    scanner = .initCompleteInput(self.gpa, std.mem.span(c.jv_string_value(dump)));
+                    defer scanner.deinit();
+
+                    scanner.enableDiagnostics(&diag);
+
+                    try output.array.append(try std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{
+                        .ignore_unknown_fields = true
+                    }));
                     result = c.jq_next(self.jq);
                 }
 
@@ -97,11 +117,11 @@ pub fn Sync(comptime Logger: type) type {
             singleton.deinit();
         }
 
-        pub fn jsonQuery(filter: []const u8, inputs: c.jv) JsonQueryError!c.jv {
+        pub fn jsonQuery(filter: []const u8, inputs: *const std.json.Value) JsonQueryError!std.json.Value {
             return singleton.jsonQuery(filter, inputs);
         }
 
-        pub fn sendRequestValue(input: c.jv) SendRequestValueError!c.jv {
+        pub fn sendRequestValue(input: c.jv) SendRequestValueError!std.json.Value {
             return singleton.sendRequestValue(input);
         }
 
@@ -187,15 +207,15 @@ pub fn Sync(comptime Logger: type) type {
                 self.docker_client.deinit();
             }
 
-            fn jsonQuery(self: *@This(), filter: []const u8, inputs: c.jv) JsonQueryError!c.jv {
+            fn jsonQuery(self: *@This(), filter: []const u8, inputs: *const std.json.Value) JsonQueryError!std.json.Value {
                 var json_query: JSONQuery = undefined;
-                try json_query.init(self.gpa, self.jq, filter);
+                try json_query.init(self.arena, self.gpa, self.jq, filter);
                 defer json_query.deinit();
 
                 return json_query.query(inputs);
             }
 
-            fn sendRequestValue(self: *@This(), input: c.jv) SendRequestValueError!c.jv {
+            fn sendRequestValue(self: *@This(), input: c.jv) SendRequestValueError!std.json.Value {
                 if (c.jv_get_kind(input) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
 
                 if (c.jv_object_has(c.jv_copy(input), c.jv_string("docker")) == @intFromBool(true)) {

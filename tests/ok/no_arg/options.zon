@@ -2,7 +2,8 @@
     .args = .{
         "getPlatform",
     },
-    .stderrEqual =
+    .stderrMatch =
+    \\Hello world !
     \\Docker Engine - Community
     ,
     .runs = .{
