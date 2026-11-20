@@ -191,7 +191,7 @@ pub const OptionsParser = struct {
     gpa: std.mem.Allocator,
     help: bool,
     version: bool,
-    rule: []const u8,
+    rule: [:0]const u8,
     rule_catched: bool,
     args: std.ArrayList([]const u8),
 
@@ -246,7 +246,7 @@ pub const OptionsParser = struct {
             if (self.help or self.version) continue;
 
             if (!self.rule_catched) {
-                self.rule = self.gpa.dupe(u8, arg) catch |err| log.fatal(err, "Occured when duping rule name", .{ .arg = arg });
+                self.rule = self.gpa.dupeSentinel(u8, arg, 0) catch |err| log.fatal(err, "Occured when duping rule name", .{ .arg = arg });
                 self.rule_catched = true;
                 continue;
             }

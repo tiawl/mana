@@ -34,12 +34,12 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     if (options.version) {
         options.printVersion();
-        if (!options.help) std.process.exit(@backingInt(log.ExitCode.info));
+        if (!options.help) std.process.exit(log.ExitCode.info.backingInt());
     }
 
     if (options.help) {
         options.printHelp();
-        std.process.exit(@backingInt(log.ExitCode.info));
+        std.process.exit(log.ExitCode.info.backingInt());
     }
 
     script.init(&arena_instance, gpa, io, &init.environ);

@@ -1,0 +1,235 @@
+{
+  "testSuite": {
+    "name": "nested-edge-cases",
+    "version": "1.0.0",
+    "metadata": {
+      "createdAt": "2026-11-22T00:00:00Z",
+      "description": "Synthetic data for testing parsers, validators, and nested object traversal.",
+      "tags": ["json", "edge-cases", "nested", "unicode", "nulls"],
+      "isSynthetic": true
+    },
+    "cases": [
+      {
+        "id": "case-001",
+        "kind": "boundary-values",
+        "input": {
+          "emptyString": "",
+          "whitespaceOnly": " \t\n ",
+          "zero": 0,
+          "negativeZero": -0.0,
+          "smallestPracticalDecimal": 0.000000000001,
+          "largeInteger": 9007199254740991,
+          "negativeInteger": -9007199254740991,
+          "booleanTrue": true,
+          "booleanFalse": false,
+          "explicitNull": null,
+          "emptyObject": {},
+          "emptyArray": []
+        },
+        "expectations": {
+          "mustPreserveNull": true,
+          "allowEmptyCollections": true,
+          "notes": [
+            "Zero is a valid value and must not be treated as missing.",
+            "The large integer is within JavaScript's safe integer range."
+          ]
+        }
+      },
+      {
+        "id": "case-002",
+        "kind": "deeply-nested",
+        "input": {
+          "user": {
+            "id": "u-💠-0042",
+            "profile": {
+              "displayName": "Zoë 李",
+              "aliases": ["Z", "zoe", "", null],
+              "preferences": {
+                "notifications": {
+                  "email": {
+                    "enabled": true,
+                    "quietHours": {
+                      "start": "22:00",
+                      "end": "07:00",
+                      "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
+                    }
+                  },
+                  "push": {
+                    "enabled": false,
+                    "deviceIds": []
+                  }
+                },
+                "layout": {
+                  "theme": "system",
+                  "density": null,
+                  "panels": [
+                    {
+                      "name": "activity",
+                      "visible": true,
+                      "width": 0
+                    },
+                    {
+                      "name": "details",
+                      "visible": false,
+                      "width": null
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "expectedPathChecks": [
+          {
+            "path": "user.profile.preferences.notifications.email.enabled",
+            "expected": true
+          },
+          {
+            "path": "user.profile.preferences.notifications.push.deviceIds",
+            "expected": []
+          },
+          {
+            "path": "user.profile.preferences.layout.panels[1].width",
+            "expected": null
+          }
+        ]
+      },
+      {
+        "id": "case-003",
+        "kind": "strings-and-escaping",
+        "input": {
+          "quotes": "She said, \"hello\".",
+          "backslashes": "C:\\temp\\folder\\file.txt",
+          "lineBreaks": "first line\nsecond line\r\nthird line",
+          "unicode": "Καλημέρα — こんにちは — مرحبًا — 🧪",
+          "combiningCharacters": "é",
+          "htmlLike": "<script>alert(\"not executable\")</script>",
+          "jsonLikeText": "{\"looks\":\"like JSON, but is a string\"}",
+          "zeroWidthCharacter": "A​B",
+          "controlCharacterEscaped": "\u0000"
+        },
+        "expectations": {
+          "parseAsDataOnly": true,
+          "preserveUnicode": true,
+          "preserveEscapedCharacters": true
+        }
+      },
+      {
+        "id": "case-004",
+        "kind": "mixed-array",
+        "input": [
+          null,
+          true,
+          false,
+          0,
+          -1,
+          3.14159,
+          "",
+          "text",
+          [],
+          {},
+          {
+            "nested": [
+              {
+                "value": null
+              },
+              {
+                "value": [
+                  "leaf",
+                  {
+                    "deeper": {
+                      "level": 4
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "expectations": {
+          "arrayLength": 11,
+          "preserveElementOrder": true,
+          "doNotCoerceTypes": true
+        }
+      },
+      {
+        "id": "case-005",
+        "kind": "optional-and-state",
+        "input": {
+          "presentAndNull": null,
+          "presentAndEmpty": "",
+          "presentAndZero": 0,
+          "presentAndFalse": false,
+          "presentAndEmptyArray": [],
+          "presentAndEmptyObject": {},
+          "status": "unknown",
+          "retryCount": 0,
+          "error": {
+            "code": "E_TEST",
+            "message": "",
+            "details": null
+          }
+        },
+        "expectedDistinctions": {
+          "missingIsDifferentFromNull": true,
+          "nullIsDifferentFromEmptyString": true,
+          "falseIsDifferentFromZero": true,
+          "emptyArrayIsDifferentFromMissing": true
+        }
+      },
+      {
+        "id": "case-006",
+        "kind": "records-with-duplicates",
+        "input": {
+          "records": [
+            {
+              "key": "alpha",
+              "revision": 1,
+              "value": "first"
+            },
+            {
+              "key": "alpha",
+              "revision": 1,
+              "value": "duplicate"
+            },
+            {
+              "key": "alpha",
+              "revision": 2,
+              "value": null
+            },
+            {
+              "key": "",
+              "revision": 0,
+              "value": []
+            }
+          ],
+          "lookup": {
+            "key": "alpha",
+            "revision": 1
+          }
+        },
+        "testCases": [
+          {
+            "operation": "find-first",
+            "expectedValue": "first"
+          },
+          {
+            "operation": "find-all",
+            "expectedCount": 2
+          },
+          {
+            "operation": "match-empty-key",
+            "expectedValue": []
+          }
+        ]
+      }
+    ],
+    "globalAssertions": {
+      "validJson": true,
+      "noComments": true,
+      "noTrailingCommas": true,
+      "noNonFiniteNumbers": true,
+      "rootType": "object"
+    }
+  }
+}

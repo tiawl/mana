@@ -112,6 +112,7 @@ const Host = struct {
     }
 };
 
+// Send requests to docker socket
 pub fn Client(comptime Logger: type) type {
     if (!std.meta.hasFn(Logger, "debug")) @compileError(@typeName(Logger) ++ " does't have debug function");
     if (@TypeOf(@field(Logger, "debug")) != fn (anytype) void) @compileError(@typeName(Logger) ++ " debug field must be `fn(anytype) void` typed but is `" ++ @typeName(@TypeOf(@field(Logger, "debug"))) ++ "` typed");
@@ -326,9 +327,9 @@ pub fn Client(comptime Logger: type) type {
             });
         }
 
-        const SendInnerError = std.Io.Cancelable || ConnectError || std.Io.Writer.Error || std.Uri.ParseError || std.http.Client.RequestError || std.mem.Allocator.Error || std.http.Client.Request.ReceiveHeadError || error{ UnexpectedInputJsonKind, MissingVersion, UnexpectedVersionJsonKind, MissingEndpoint, UnexpectedEndpointJsonKind, MissingMethod, UnexpectedMethodJsonKind, UnknownHttpMethod, UnexpectedParametersJsonKind, UnknownDockerApiVersion, UnsupportedCompressionMethod } || error{WriteFailed} || Response.Interface.ProcessError;
+        const SendInnerError = std.Io.Cancelable || ConnectError || std.Io.Writer.Error || std.Uri.ParseError || std.http.Client.RequestError || std.mem.Allocator.Error || std.http.Client.Request.ReceiveHeadError || error{ UnexpectedInputJsonKind, MissingVersion, UnexpectedVersionJsonKind, MissingEndpoint, UnexpectedEndpointJsonKind, MissingMethod, UnexpectedMethodJsonKind, UnknownHttpMethod, UnexpectedParametersJsonKind, UnknownDockerApiVersion, UnsupportedCompressionMethod } || error{WriteFailed} || Response.Interface.ProcessError || std.json.ParseError(std.json.Scanner);
 
-        fn sendInner(self: *@This(), response: *const Response.Interface, req_body: *const c.jv) SendInnerError!c.jv {
+        fn sendInner(self: *@This(), response: *const Response.Interface, req_body: *const c.jv) SendInnerError!std.json.Value {
             if (c.jv_get_kind(req_body.*) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
             if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) != @intFromBool(true)) return error.MissingVersion;
             const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
@@ -427,9 +428,12 @@ pub fn Client(comptime Logger: type) type {
             var transfer_buffer: [64]u8 = undefined;
             var decompress: std.http.Decompress = undefined;
             const reader = http_response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-            var parsed: c.jv = undefined;
-            var output = c.jv_array();
+            var parsed: std.json.Value = undefined;
+            var output: std.json.Value = .{ .array = .init(self.gpa) };
+            errdefer output.array.deinit();
 
+            var diag: std.json.Diagnostics = .{};
+            var scanner: std.json.Scanner = undefined;
             while (true) {
                 _ = reader.streamDelimiter(&http_response_body.writer, '\n') catch |err| switch (err) {
                     error.ReadFailed => return http_response.bodyErr().?,
@@ -440,8 +444,13 @@ pub fn Client(comptime Logger: type) type {
 
                 const written = try http_response_body.toOwnedSliceSentinel(0);
                 defer self.gpa.free(written);
-                parsed = c.jv_parse(written.ptr);
-                defer c.jv_free(parsed);
+
+                scanner = .initCompleteInput(self.gpa, written);
+                defer scanner.deinit();
+
+                scanner.enableDiagnostics(&diag);
+
+                parsed = try std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{ .ignore_unknown_fields = true });
 
                 try response.process(&output, &parsed);
 
@@ -451,8 +460,8 @@ pub fn Client(comptime Logger: type) type {
             return output;
         }
 
-        pub fn send(self: *@This(), req_body: *const c.jv) SendError!c.jv {
-            var default_impl: Response.Impl.Default = .{};
+        pub fn send(self: *@This(), req_body: *const c.jv) SendError!std.json.Value {
+            var default_impl: Response.Impl.Default = .{ .gpa = self.gpa };
             const response = default_impl.response();
             return self.sendInner(&response, req_body);
         }
@@ -498,7 +507,7 @@ pub fn Client(comptime Logger: type) type {
             }
         }
 
-        pub fn sendBuild(self: *@This(), req_body: *const c.jv) SendBuildError!c.jv {
+        pub fn sendBuild(self: *@This(), req_body: *const c.jv) SendBuildError!std.json.Value {
             if (c.jv_get_kind(req_body.*) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
             if (c.jv_object_has(c.jv_copy(req_body.*), c.jv_string("version")) != @intFromBool(true)) return error.MissingVersion;
             const version_jv = c.jv_object_get(c.jv_copy(req_body.*), c.jv_string("version"));
@@ -546,7 +555,7 @@ pub fn Client(comptime Logger: type) type {
         const Response = struct {
             const Interface = struct {
                 const VTable = struct {
-                    process_fn: *const fn (*anyopaque, *c.jv, *const c.jv) ProcessError!void,
+                    process_fn: *const fn (*anyopaque, *std.json.Value, *const std.json.Value) ProcessError!void,
                 };
 
                 ptr: *anyopaque,
@@ -556,18 +565,20 @@ pub fn Client(comptime Logger: type) type {
 
                 const ProcessError = protobuf.DecodingError || std.Io.Reader.Error || std.mem.Allocator.Error || std.base64.Error || error{ BuildkitFailure, DockerBuildEndpointFailure };
 
-                fn process(self: @This(), output: *c.jv, parsed: *const c.jv) ProcessError!void {
-                    std.debug.assert(c.jv_get_kind(output.*) == c.JV_KIND_ARRAY);
+                fn process(self: @This(), output: *std.json.Value, parsed: *const std.json.Value) ProcessError!void {
+                    std.debug.assert(std.meta.activeTag(output.*) == .array);
                     try self.vtable.process_fn(self.ptr, output, parsed);
                 }
             };
 
             const Impl = struct {
                 const Default = struct {
-                    fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) Interface.ProcessError!void {
+                    gpa: std.mem.Allocator,
+
+                    fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) Interface.ProcessError!void {
                         const self: *@This() = @ptrCast(@alignCast(ptr));
                         _ = self;
-                        output.* = c.jv_array_append(output.*, c.jv_copy(parsed.*));
+                        try output.array.append(parsed.*);
                     }
 
                     fn response(self: *@This()) Response.Interface {
@@ -591,18 +602,14 @@ pub fn Client(comptime Logger: type) type {
                     proto_reader: std.Io.Reader = undefined,
                     status_resp: buildkit.StatusResponse = undefined,
 
-                    fn process(ptr: *anyopaque, output: *c.jv, parsed: *const c.jv) Interface.ProcessError!void {
+                    fn process(ptr: *anyopaque, output: *std.json.Value, parsed: *const std.json.Value) Interface.ProcessError!void {
                         _ = output;
                         const self: *@This() = @ptrCast(@alignCast(ptr));
 
-                        if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("id")) == @intFromBool(true)) {
-                            const id_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("id"));
-                            defer c.jv_free(id_jv);
-                            const id = std.mem.span(c.jv_string_value(id_jv));
+                        if (parsed.object.contains("id")) {
+                            const id = parsed.object.get("id").?.string;
                             if (std.mem.eql(u8, id, "moby.buildkit.trace")) {
-                                const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
-                                defer c.jv_free(aux_jv);
-                                const b64_encoded = std.mem.span(c.jv_string_value(aux_jv));
+                                const b64_encoded = parsed.object.get("aux").?.string;
                                 const decoded = self.b64_buffer[0..try std.base64.standard.Decoder.calcSizeForSlice(b64_encoded)];
                                 try std.base64.standard.Decoder.decode(decoded, b64_encoded);
                                 self.proto_reader = .fixed(decoded);
@@ -625,19 +632,13 @@ pub fn Client(comptime Logger: type) type {
                                     for (self.status_resp.warnings.items) |w| Logger.warn(error.BuildkitFailure, trim(w.short), .{});
                                 } else unreachable;
                             } else if (std.mem.eql(u8, id, "moby.image.id")) {
-                                const aux_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("aux"));
-                                defer c.jv_free(aux_jv);
-                                const image_id_jv = c.jv_object_get(c.jv_copy(aux_jv), c.jv_string("ID"));
-                                defer c.jv_free(image_id_jv);
-                                Logger.debug(.{ .image_id = std.mem.span(c.jv_string_value(image_id_jv)) });
+                                const image_id = parsed.object.get("aux").?.object.get("ID").?.string;
+                                Logger.debug(.{ .image_id = image_id });
                             } else unreachable;
-                        } else if (c.jv_object_has(c.jv_copy(parsed.*), c.jv_string("errorDetail")) == @intFromBool(true)) {
-                            const error_detail_jv = c.jv_object_get(c.jv_copy(parsed.*), c.jv_string("errorDetail"));
-                            defer c.jv_free(error_detail_jv);
-                            const message_jv = c.jv_object_get(c.jv_copy(error_detail_jv), c.jv_string("message"));
-                            defer c.jv_free(message_jv);
+                        } else if (parsed.object.contains("errorDetail")) {
+                            const error_message = parsed.object.get("errorDetail").?.object.get("message").?.string;
                             const e = error.DockerBuildEndpointFailure;
-                            Logger.err(e, std.mem.span(c.jv_string_value(message_jv)), .{});
+                            Logger.err(e, error_message, .{});
                             return e;
                         } else unreachable;
                     }

@@ -1,10 +1,21 @@
 const std = @import("std");
 
-pub const ExitCode = enum(@typeInfo(@TypeOf(std.process.exit)).@"fn".param_types[0].?) {
-    ok = 0,
-    err = 1,
-    fatal = 2,
-    info = 3,
+pub const ExitCode = enum {
+    ok,
+    err,
+    fatal,
+    info,
+    warn,
+
+    pub fn backingInt(self: @This()) u8 {
+        return switch (self) {
+            .ok => 0,
+            .err => 1,
+            .fatal => 2,
+            .info => 3,
+            .warn => @This().ok.backingInt(),
+        };
+    }
 };
 
 fn init(writer: *std.Io.Writer) struct { std.zon.Serializer, std.Io.Terminal } {
@@ -87,13 +98,14 @@ fn Fatal(comptime Details: type) type {
 
         pub fn format(self: @This(), writer: *std.Io.Writer) !void {
             var serializer, var term = init(writer);
-            writer.writeAll("\x1b[38;5;214m") catch return error.WriteFailed;
+            writer.writeAll("\x1b[38;5;208m") catch return error.WriteFailed;
             var outer = try serializer.beginStruct(.{});
             var inner = try outer.beginStructField("fatal", .{});
             try inner.fieldPrefix("id");
             try serializer.ident(@errorName(self.id));
             try inner.field("message", self.message, .{});
             try inner.field("details", self.details, .{});
+            try inner.field("tips", "Please open an issue here: https://github.com/tiawl/mana/issues", .{});
             try inner.end();
             try outer.end();
             term.setColor(.reset) catch return error.WriteFailed;
@@ -136,15 +148,12 @@ pub const Logger = struct {
 pub const debug = Logger.debug;
 pub const warn = Logger.warn;
 
-fn exit(id: anyerror, message: []const u8, details: anytype, code: u8) noreturn {
+pub fn err(id: anyerror, comptime message: []const u8, details: anytype) noreturn {
     Logger.err(id, message, details);
-    std.process.exit(code);
+    std.process.exit(ExitCode.err.backingInt());
 }
 
-pub fn err(e: anyerror, comptime message: []const u8, details: anytype) noreturn {
-    exit(e, message, details, @backingInt(ExitCode.err));
-}
-
-pub fn fatal(e: anyerror, comptime message: []const u8, details: anytype) noreturn {
-    exit(e, message, details, @backingInt(ExitCode.fatal));
+pub fn fatal(id: anyerror, comptime message: []const u8, details: anytype) noreturn {
+    Logger.fatal(id, message, details);
+    std.process.exit(ExitCode.fatal.backingInt());
 }

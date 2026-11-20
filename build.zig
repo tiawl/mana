@@ -67,20 +67,20 @@ fn buildOptionsModule(builder: *std.Build) *std.Build.Module {
     return options.createModule();
 }
 
-fn buildProtobufGeneratorExecutable(builder: *std.Build) *std.Build.Step.Compile {
+fn buildProtobufGeneratorExecutable(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step.Compile {
     return builder.addExecutable(.{
         .name = "protobuf_generator",
         .root_module = builder.createModule(.{
             .root_source_file = builder.path(builder.pathResolve(&.{ "src", "protobuf_generator.zig" })),
-            .target = builder.graph.host,
-            .optimize = .debug,
+            .target = target,
+            .optimize = optimize,
             .imports = &.{},
         }),
     });
 }
 
-fn buildBuildkitModule(builder: *std.Build, protobuf_dep: *std.Build.Dependency, protobuf_mod: *std.Build.Module) struct { *RunProtocStep, *std.Build.Module } {
-    const protobuf_generator_exe = buildProtobufGeneratorExecutable(builder);
+fn buildBuildkitModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, protobuf_dep: *std.Build.Dependency, protobuf_mod: *std.Build.Module) struct { *RunProtocStep, *std.Build.Module } {
+    const protobuf_generator_exe = buildProtobufGeneratorExecutable(builder, target, optimize);
 
     const generated_zig = builder.addWriteFiles().add("generated.zig",
         \\pub const v1 = @import("moby/buildkit/v1.pb.zig");
@@ -89,7 +89,7 @@ fn buildBuildkitModule(builder: *std.Build, protobuf_dep: *std.Build.Dependency,
     const protobuf_generator = builder.addRunArtifact(protobuf_generator_exe);
     const proto_dir = protobuf_generator.addOutputDirectoryArg2("proto", .{});
 
-    var protobuf_compiler: *RunProtocStep = .create(protobuf_dep.builder, builder.graph.host, .{
+    var protobuf_compiler: *RunProtocStep = .create(protobuf_dep.builder, target, .{
         .destination_directory = generated_zig.dirname(),
         .source_files = &.{
             proto_dir.path(builder, builder.pathJoin(&[_][]const u8{
@@ -105,8 +105,8 @@ fn buildBuildkitModule(builder: *std.Build, protobuf_dep: *std.Build.Dependency,
         protobuf_compiler,
         builder.createModule(.{
             .root_source_file = generated_zig,
-            .target = builder.graph.host,
-            .optimize = .debug,
+            .target = target,
+            .optimize = optimize,
             .imports = &.{
                 .{ .name = "protobuf", .module = protobuf_mod },
             },
@@ -114,7 +114,7 @@ fn buildBuildkitModule(builder: *std.Build, protobuf_dep: *std.Build.Dependency,
     };
 }
 
-fn buildJQModule(builder: *std.Build) !*std.Build.Module {
+fn buildJQModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) !*std.Build.Module {
     const translate_c_dep = builder.dependency("translate_c", .{});
     const jq_builder = builder.dependency("jq", .{}).builder;
     const flags = [_][]const u8{
@@ -123,8 +123,8 @@ fn buildJQModule(builder: *std.Build) !*std.Build.Module {
 
     const translate_jq = TranslateC.init(translate_c_dep, .{
         .c_source_file = jq_builder.path(jq_builder.pathResolve(&.{ "src", "jq.h" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .link_libc = true,
     });
 
@@ -179,11 +179,11 @@ fn buildJQModule(builder: *std.Build) !*std.Build.Module {
     return translate_jq.mod;
 }
 
-fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, protobuf_mod: *std.Build.Module, buildkit_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
+fn buildDockerModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options_mod: *std.Build.Module, protobuf_mod: *std.Build.Module, buildkit_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "docker.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "build", .module = options_mod },
             .{ .name = "buildkit", .module = buildkit_mod },
@@ -193,11 +193,11 @@ fn buildDockerModule(builder: *std.Build, options_mod: *std.Build.Module, protob
     });
 }
 
-fn buildSyncModule(builder: *std.Build, docker_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
+fn buildClientModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, docker_mod: *std.Build.Module, jq_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
-        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "sync.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "client.zig" })),
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "docker", .module = docker_mod },
             .{ .name = "jq", .module = jq_mod },
@@ -205,53 +205,72 @@ fn buildSyncModule(builder: *std.Build, docker_mod: *std.Build.Module, jq_mod: *
     });
 }
 
-fn buildLogModule(builder: *std.Build) *std.Build.Module {
+fn buildLogModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "log.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .imports = &.{},
     });
 }
 
-fn buildSchedulerModule(builder: *std.Build, sync_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildZluaModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
+    const zlua_dep = builder.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+        .lang = .lua55,
+    });
+    return zlua_dep.module("zlua");
+}
+
+fn buildJsonLuaModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, zlua_mod: *std.Build.Module) *std.Build.Module {
+    return builder.createModule(.{
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "jl.zig" })),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zlua", .module = zlua_mod },
+        },
+    });
+}
+
+fn buildSchedulerModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, client_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "scheduler.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
-            .{ .name = "sync", .module = sync_mod },
+            .{ .name = "client", .module = client_mod },
             .{ .name = "jq", .module = jq_mod },
+            .{ .name = "zlua", .module = zlua_mod },
+            .{ .name = "jl", .module = jl_mod },
             .{ .name = "log", .module = log_mod },
         },
     });
 }
 
-fn buildScriptModule(builder: *std.Build, options_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
-    const zlua_dep = builder.dependency("zlua", .{
-        .target = builder.graph.host,
-        .optimize = .debug,
-        .lang = .lua55,
-    });
+fn buildScriptModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options_mod: *std.Build.Module, client_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "script.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
+            .{ .name = "client", .module = client_mod },
             .{ .name = "scheduler", .module = scheduler_mod },
             .{ .name = "build", .module = options_mod },
             .{ .name = "log", .module = log_mod },
-            .{ .name = "zlua", .module = zlua_dep.module("zlua") },
+            .{ .name = "zlua", .module = zlua_mod },
+            .{ .name = "jl", .module = jl_mod },
             .{ .name = "jq", .module = jq_mod },
         },
     });
 }
 
-fn buildManaModule(builder: *std.Build, options_mod: *std.Build.Module, script_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildManaModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options_mod: *std.Build.Module, script_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "mana.zig" })),
-        .target = builder.graph.host,
-        .optimize = .debug,
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "script", .module = script_mod },
             .{ .name = "build", .module = options_mod },
@@ -260,18 +279,20 @@ fn buildManaModule(builder: *std.Build, options_mod: *std.Build.Module, script_m
     });
 }
 
-fn buildManaExecutable(builder: *std.Build) !struct { *std.Build.Step.Compile, *std.Build.Step.InstallArtifact } {
+fn buildManaExecutable(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) !struct { *std.Build.Step.Compile, *std.Build.Step.InstallArtifact, *std.Build.Module, *std.Build.Module } {
     const options_mod = buildOptionsModule(builder);
     const protobuf_dep = builder.dependency("protobuf", .{});
     const protobuf_mod = protobuf_dep.module("protobuf");
-    const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder, protobuf_dep, protobuf_mod);
-    const jq_mod = try buildJQModule(builder);
-    const docker_mod = buildDockerModule(builder, options_mod, protobuf_mod, buildkit_mod, jq_mod);
-    const sync_mod = buildSyncModule(builder, docker_mod, jq_mod);
-    const log_mod = buildLogModule(builder);
-    const scheduler_mod = buildSchedulerModule(builder, sync_mod, jq_mod, log_mod);
-    const script_mod = buildScriptModule(builder, options_mod, scheduler_mod, jq_mod, log_mod);
-    const mana_mod = buildManaModule(builder, options_mod, script_mod, log_mod);
+    const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder, target, optimize, protobuf_dep, protobuf_mod);
+    const jq_mod = try buildJQModule(builder, target, optimize);
+    const docker_mod = buildDockerModule(builder, target, optimize, options_mod, protobuf_mod, buildkit_mod, jq_mod);
+    const client_mod = buildClientModule(builder, target, optimize, docker_mod, jq_mod);
+    const log_mod = buildLogModule(builder, target, optimize);
+    const zlua_mod = buildZluaModule(builder, target, optimize);
+    const jl_mod = buildJsonLuaModule(builder, target, optimize, zlua_mod);
+    const scheduler_mod = buildSchedulerModule(builder, target, optimize, client_mod, jq_mod, zlua_mod, jl_mod, log_mod);
+    const script_mod = buildScriptModule(builder, target, optimize, options_mod, client_mod, scheduler_mod, jq_mod, zlua_mod, jl_mod, log_mod);
+    const mana_mod = buildManaModule(builder, target, optimize, options_mod, script_mod, log_mod);
 
     var mana_exe = builder.addExecutable(.{
         .name = "mana",
@@ -283,12 +304,19 @@ fn buildManaExecutable(builder: *std.Build) !struct { *std.Build.Step.Compile, *
     const mana_install = builder.addInstallArtifact(mana_exe, .{});
     builder.getInstallStep().dependOn(&mana_install.step);
 
-    return .{ mana_exe, mana_install };
+    return .{ mana_exe, mana_install, zlua_mod, jl_mod };
 }
 
 pub fn build(builder: *std.Build) !void {
-    const mana_exe, const mana_install = try buildManaExecutable(builder);
-    try testManaExecutable(builder, mana_exe, mana_install);
+    const target = builder.standardTargetOptions(.{});
+    const optimize = builder.standardOptimizeOption(.{}) orelse .debug;
+    const mana_exe, const mana_install, const zlua_mod, const jl_mod = try buildManaExecutable(builder, target, optimize);
+
+    const test_step = builder.step("test", "Run tests");
+    test_step.dependOn(&mana_install.step);
+
+    try runManaExecutableTests(builder, test_step, mana_exe);
+    try runJsonLuaModuleTests(builder, test_step, zlua_mod, jl_mod);
 }
 
 const TestEnvironment = struct {
@@ -303,7 +331,7 @@ const TestOptions = struct {
     runs: []const TestEnvironment,
 };
 
-fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, options_zon: []const u8) !void {
+fn runManaExecutableTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *std.Build.Step, tests_dir: std.Io.Dir, start_redirect_step: *std.Build.Step, stop_redirect_step: *std.Build.Step, options_zon: []const u8) !void {
     const test_dir = std.fs.path.dirname(options_zon).?;
     var it = std.fs.path.componentIterator(test_dir);
     const exit_code = it.first().?.name;
@@ -315,12 +343,13 @@ fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *s
         .source = options_source,
         .diagnostics = &diag,
     });
+    var mana: *std.Build.Step.Run = undefined;
     for (0..options.runs.len) |i| {
-        const mana = builder.addRunArtifact(mana_exe);
+        mana = builder.addRunArtifact(mana_exe);
         mana.has_side_effects = true;
         mana.addArgs(options.args);
-        mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", test_dir })));
-        mana.expectExitCode(@backingInt(std.meta.stringToEnum(log.ExitCode, exit_code) orelse unreachable));
+        mana.setCwd(builder.path(builder.pathResolve(&.{ "tests", "integration", test_dir })));
+        mana.expectExitCode((std.meta.stringToEnum(log.ExitCode, exit_code) orelse unreachable).backingInt());
         if (std.mem.eql(u8, exit_code, "ok")) {
             if (options.stderrEqual) |stderr| {
                 mana.expectStdErrEqual(builder.fmt("{s}\n", .{stderr}));
@@ -345,10 +374,7 @@ fn runTest(builder: *std.Build, mana_exe: *std.Build.Step.Compile, test_step: *s
     }
 }
 
-fn testManaExecutable(builder: *std.Build, mana_exe: *std.Build.Step.Compile, mana_install: *std.Build.Step.InstallArtifact) !void {
-    const test_step = builder.step("test", "Run tests");
-    test_step.dependOn(&mana_install.step);
-
+fn runManaExecutableTests(builder: *std.Build, test_step: *std.Build.Step, mana_exe: *std.Build.Step.Compile) !void {
     _ = builder.findProgram(.{ .names = &.{"sleep"} }) orelse return error.InstallSleepPlease;
     _ = builder.findProgram(.{ .names = &.{"socat"} }) orelse return error.InstallSocatPlease;
     const start_redirect = builder.addSystemCommand(&.{
@@ -364,7 +390,7 @@ fn testManaExecutable(builder: *std.Build, mana_exe: *std.Build.Step.Compile, ma
 
     test_step.dependOn(&stop_redirect.step);
 
-    const tests_dir = try builder.root.openDir(builder.graph.io, "tests", .{ .iterate = true });
+    const tests_dir = try builder.root.openDir(builder.graph.io, builder.pathResolve(&.{ "tests", "integration" }), .{ .iterate = true });
     defer tests_dir.close(builder.graph.io);
 
     var walker = try tests_dir.walk(builder.graph.arena);
@@ -373,9 +399,35 @@ fn testManaExecutable(builder: *std.Build, mana_exe: *std.Build.Step.Compile, ma
     while (try walker.next(builder.graph.io)) |entry| {
         switch (entry.kind) {
             .file => if (std.mem.eql(u8, entry.basename, "options.zon")) {
-                try runTest(builder, mana_exe, test_step, tests_dir, &start_redirect.step, &stop_redirect.step, entry.path);
+                try runManaExecutableTest(builder, mana_exe, test_step, tests_dir, &start_redirect.step, &stop_redirect.step, entry.path);
             },
             else => {},
         }
     }
+}
+
+fn runJsonLuaModuleTests(builder: *std.Build, test_step: *std.Build.Step, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module) !void {
+    const tester_mod = builder.createModule(.{
+        .root_source_file = builder.path(builder.pathResolve(&.{ "tests", "unit", "jl", "tester.zig" })),
+        .target = builder.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "zlua", .module = zlua_mod },
+            .{ .name = "jl", .module = jl_mod },
+        },
+    });
+
+    const tester_exe = builder.addExecutable(.{
+        .name = "jl_tester",
+        .root_module = tester_mod,
+    });
+
+    var tester = builder.addRunArtifact(tester_exe);
+    tester.has_side_effects = true;
+    tester.addFileArg2(builder.path(builder.pathResolve(&.{ "tests", "unit", "jl", "test_suite.json" })), .{});
+    tester.addFileArg2(builder.path(builder.pathResolve(&.{ "tests", "unit", "jl", "test_suite.lua" })), .{});
+    tester.expectExitCode(3);
+    tester.addCheck(.{ .expect_stdout_exact = tester.step.owner.graph.dupeString("") });
+
+    test_step.dependOn(&tester.step);
 }

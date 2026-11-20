@@ -1,0 +1,15 @@
+.{
+    .args = .{
+        "hello",
+    },
+    .stderrEqual =
+    \\bye
+    \\bye
+    ,
+    .runs = .{
+        .{},
+        .{
+            .DOCKER_HOST = "tcp://127.0.0.1:2375",
+        },
+    },
+}

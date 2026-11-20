@@ -1,0 +1,18 @@
+- side quests:
+  - write tests for warning
+  - make docker.Client a singleton
+  - add oniguruma for jq
+  - add log level:
+    - add more debug and informations
+    - configure hook ?
+- main quest:
+  - add plugin system for custom tasks/modules:
+    - see how zig fetch and manage dependencies
+    - lua load hook
+    - merge plugins build.zig with mana build.zig
+  - make jq a plugin
+  - test plugins:
+    - jq
+    - ssh
+  - add a way to defer tasks into lua ?
+  - doc

@@ -1,0 +1,216 @@
+const std = @import("std");
+const docker = @import("docker");
+const c = @import("jq");
+
+pub const ClientInitError = error{ JqInit, JqUtilInputInit };
+
+const docker_api_version = "v1.56";
+
+// Send requests to used tools
+pub fn Client(comptime Logger: type) type {
+    return struct {
+        pub const JsonQueryError = std.mem.Allocator.Error || JSONQuery.QueryError;
+
+        const JSONQuery = struct {
+            arena: std.mem.Allocator,
+            gpa: std.mem.Allocator,
+            jq: *c.jq_state,
+            filter: [:0]const u8,
+
+            pub fn init(self: *@This(), arena: std.mem.Allocator, gpa: std.mem.Allocator, jq: *c.jq_state, filter: []const u8) std.mem.Allocator.Error!void {
+                self.arena = arena;
+                self.gpa = gpa;
+                self.jq = jq;
+                self.filter = try self.gpa.dupeSentinel(u8, filter, 0);
+            }
+
+            pub fn deinit(self: *@This()) void {
+                defer self.gpa.free(self.filter);
+            }
+
+            const QueryError = error{
+                IncorrectJqFilter,
+                JqHalted,
+                JqInvalidMsg,
+                UnexpectedInputJsonKind,
+            } || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+
+            pub fn query(self: *@This(), inputs: *const std.json.Value) QueryError!std.json.Value {
+                if (std.meta.activeTag(inputs.*) != .object) return error.UnexpectedInputJsonKind;
+                var aw: std.Io.Writer.Allocating = .init(self.gpa);
+                defer aw.deinit();
+                std.json.Stringify.value(inputs, .{}, &aw.writer) catch return error.OutOfMemory;
+                aw.writer.writeByte(0) catch return error.OutOfMemory;
+
+                if (c.jq_compile(self.jq, self.filter) != @intFromBool(true)) return error.IncorrectJqFilter;
+                c.jq_start(self.jq, c.jv_parse(aw.written().ptr), 0);
+                var output: std.json.Value = .{ .array = .init(self.gpa) };
+                errdefer output.array.deinit();
+                var result = c.jq_next(self.jq);
+                defer c.jv_free(result);
+
+                var diag: std.json.Diagnostics = .{};
+                var scanner: std.json.Scanner = undefined;
+                while (c.jv_is_valid(result) == @intFromBool(true)) {
+                    const dump = c.jv_dump_string(result, c.JV_KIND_INVALID);
+                    defer c.jv_free(dump);
+
+                    scanner = .initCompleteInput(self.gpa, std.mem.span(c.jv_string_value(dump)));
+                    defer scanner.deinit();
+
+                    scanner.enableDiagnostics(&diag);
+
+                    try output.array.append(try std.json.parseFromTokenSourceLeaky(std.json.Value, self.arena, &scanner, .{ .ignore_unknown_fields = true }));
+                    result = c.jq_next(self.jq);
+                }
+
+                if (c.jq_halted(self.jq) == @intFromBool(true)) {
+                    var msg = c.jq_get_error_message(self.jq);
+                    defer c.jv_free(msg);
+                    const exit_code = c.jq_get_exit_code(self.jq);
+                    defer c.jv_free(exit_code);
+                    if (c.jv_is_valid(exit_code) == @intFromBool(true)) {
+                        if (c.jv_get_kind(msg) != c.JV_KIND_STRING) {
+                            const dump = c.jv_dump_string(msg, c.JV_PRINT_INVALID);
+                            defer c.jv_free(dump);
+                            c.jv_free(msg);
+                            msg = dump;
+                        }
+                        const e = error.JqHalted;
+                        Logger.err(e, std.mem.span(c.jv_string_value(msg)), .{
+                            .code = c.jv_number_value(exit_code),
+                        });
+                        return e;
+                    }
+                } else if (c.jv_invalid_has_msg(c.jv_copy(result)) == @intFromBool(true)) {
+                    var msg = c.jv_invalid_get_msg(c.jv_copy(result));
+                    defer c.jv_free(msg);
+                    const pos = c.jq_util_input_get_position(self.jq);
+                    defer c.jv_free(pos);
+                    if (c.jv_get_kind(msg) != c.JV_KIND_STRING) {
+                        const dump = c.jv_dump_string(msg, c.JV_PRINT_INVALID);
+                        defer c.jv_free(dump);
+                        c.jv_free(msg);
+                        msg = dump;
+                    }
+                    const e = error.JqInvalidMsg;
+                    Logger.err(e, std.mem.span(c.jv_string_value(msg)), .{
+                        .pos = std.mem.span(c.jv_string_value(pos)),
+                    });
+                    return e;
+                }
+
+                return output;
+            }
+        };
+
+        var singleton: Inner = undefined;
+
+        pub const SendRequestValueError = docker.Client(Logger).SendError || docker.Client(Logger).SendBuildError || error{UnexpectedInputJsonKind};
+
+        pub fn init(arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) ClientInitError!void {
+            try singleton.init(arena_instance, gpa, io, environ);
+        }
+
+        pub fn deinit() void {
+            singleton.deinit();
+        }
+
+        pub fn jsonQuery(filter: []const u8, inputs: *const std.json.Value) JsonQueryError!std.json.Value {
+            return singleton.jsonQuery(filter, inputs);
+        }
+
+        pub fn sendRequestValue(input: c.jv) SendRequestValueError!std.json.Value {
+            return singleton.sendRequestValue(input);
+        }
+
+        fn checkCallbackInput(input: c.jv) c.jv {
+            if (c.jv_get_kind(input) == c.JV_KIND_STRING) return input;
+            const dump = c.jv_dump_string(c.jv_copy(input), c.JV_PRINT_INVALID);
+            c.jv_free(input);
+            return dump;
+        }
+
+        fn jqDebugCallback(data: ?*anyopaque, input: c.jv) callconv(.c) void {
+            _ = data;
+            const msg = checkCallbackInput(input);
+            defer c.jv_free(msg);
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(c.jv_string_value(msg)), '\n');
+            while (it.next()) |token| Logger.debug(.{
+                .scope = .jq,
+                .token = token,
+            });
+        }
+
+        fn jqStderrCallback(data: ?*anyopaque, input: c.jv) callconv(.c) void {
+            _ = data;
+            const msg = checkCallbackInput(input);
+            defer c.jv_free(msg);
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(c.jv_string_value(msg)), '\n');
+            while (it.next()) |token| std.debug.print("{s}\n", .{token});
+        }
+
+        fn jqErrorCallback(data: ?*anyopaque, input: c.jv) callconv(.c) void {
+            _ = data;
+            const msg = checkCallbackInput(input);
+            defer c.jv_free(msg);
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(c.jv_string_value(msg)), '\n');
+            while (it.next()) |token| Logger.err(error.JqError, token, .{});
+        }
+
+        const Inner = struct {
+            arena: std.mem.Allocator,
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            docker_client: docker.Client(Logger),
+            jq: *c.jq_state,
+            jq_util_input: *c.jq_util_input_state,
+
+            fn init(self: *@This(), arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) ClientInitError!void {
+                self.arena = arena_instance.allocator();
+                self.gpa = gpa;
+                self.io = io;
+                self.docker_client = .init(arena_instance, gpa, io, environ);
+                if (c.jq_init()) |jq| {
+                    self.jq = jq;
+                } else return error.JqInit;
+                c.jq_set_error_cb(self.jq, jqErrorCallback, null);
+                c.jq_set_stderr_cb(self.jq, jqStderrCallback, null);
+                c.jq_set_debug_cb(self.jq, jqDebugCallback, null);
+                if (c.jq_util_input_init(null, null)) |jq_util_input| {
+                    self.jq_util_input = jq_util_input;
+                } else return error.JqUtilInputInit;
+                c.jq_set_input_cb(self.jq, c.jq_util_input_next_input_cb, self.jq_util_input);
+                c.jq_util_input_set_parser(self.jq_util_input, c.jv_parser_new(0), 0);
+            }
+
+            fn deinit(self: *@This()) void {
+                c.jq_util_input_free(@ptrCast(&self.jq_util_input));
+                c.jq_teardown(@ptrCast(&self.jq));
+                self.docker_client.deinit();
+            }
+
+            fn jsonQuery(self: *@This(), filter: []const u8, inputs: *const std.json.Value) JsonQueryError!std.json.Value {
+                var json_query: JSONQuery = undefined;
+                try json_query.init(self.arena, self.gpa, self.jq, filter);
+                defer json_query.deinit();
+
+                return json_query.query(inputs);
+            }
+
+            fn sendRequestValue(self: *@This(), input: c.jv) SendRequestValueError!std.json.Value {
+                if (c.jv_get_kind(input) != c.JV_KIND_OBJECT) return error.UnexpectedInputJsonKind;
+
+                if (c.jv_object_has(c.jv_copy(input), c.jv_string("docker")) == @intFromBool(true)) {
+                    const req_body = c.jv_object_get(c.jv_copy(input), c.jv_string("docker"));
+                    defer c.jv_free(req_body);
+                    return self.docker_client.send(&req_body);
+                } else if (c.jv_object_has(c.jv_copy(input), c.jv_string("docker_build")) == @intFromBool(true)) {
+                    const req_body = c.jv_object_get(c.jv_copy(input), c.jv_string("docker_build"));
+                    defer c.jv_free(req_body);
+                    return self.docker_client.sendBuild(&req_body);
+                } else unreachable;
+            }
+        };
+    };
+}

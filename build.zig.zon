@@ -1,7 +1,7 @@
 .{
     .name = .mana,
     .version = "0.0.0",
-    .description = "A declarative Docker Engine scheduler",
+    .description = "A Docker Engine scheduler you can drive with Lua",
     .fingerprint = 0x60d64632ff8733b3,
     .minimum_zig_version = "0.18.0-dev",
     .dependencies = .{
