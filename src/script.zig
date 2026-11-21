@@ -101,6 +101,10 @@ fn schedulerNewCustomTask(vm: *zlua.Lua) i32 {
     _ = vm.getGlobal("string");
     _ = vm.getField(-1, "dump");
     vm.remove(-2); // remove "string" table
+    var info: zlua.DebugInfo = .{};
+    vm.pushValue(2); // push the function
+    vm.getInfo(.{ .n = true }, &info);
+    std.log.warn("{s}\n", .{info.name.?});
     vm.pushValue(2); // push the function
     vm.protectedCall(.{ .args = 1, .results = 1 }) catch |err| log.fatal(err, "Occured when dumping bytecode for custom task in main Lua VM stack", .{ .src = @src(), .id = task_id });
 
