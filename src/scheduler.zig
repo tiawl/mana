@@ -108,9 +108,9 @@ const CustomTask = struct {
         if (status != .ok) log.fatal(error.RunContextYield, "The thread running the custom task yields", .{ .task = self.id });
 
         self.output = jl.jsonFromLua(self.thread, RETURNED_VALUE) catch |err| switch (err) {
-            error.UnsupportedLuaType => log.err(error.RunContextUnsupportedLuaType, "Occured when popping and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
-            error.UnsupportedLuaKeyType => log.err(error.RunContextUnsupportedLuaKeyType, "Occured when popping and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
-            else => log.fatal(err, "Occured when popping and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
+            error.UnsupportedLuaType => log.err(error.RunContextUnsupportedLuaType, "Occured when reading and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
+            error.UnsupportedLuaKeyType => log.err(error.RunContextUnsupportedLuaKeyType, "Occured when reading and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
+            else => log.fatal(err, "Occured when reading and converting to Json the returned value from function used by custom stask from Lua thread stack", .{ .task = self.id }),
         };
 
         self.thread.pop(1);

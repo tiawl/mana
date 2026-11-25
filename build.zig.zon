@@ -21,6 +21,10 @@
             .url = "git+https://github.com/tiawl-forks/ziglua#51a037ef301c89bf5abf6ef41e26a9f4978bf535",
             .hash = "zlua-0.1.0-hGRpC2qrBQCWA32ezjk549WeRmKav2mdXvJxBsAPqcDs",
         },
+        .libffi = .{
+            .url = "git+https://github.com/allyourcodebase/libffi#83c3b263ce55d3c05eebcced8c8d09d83b84c706",
+            .hash = "libffi-3.5.2-QhHaJ284AABQtosHkKkqtc3ckHlJhdXcVyV1-I7-xISv",
+        },
     },
     .paths = .{
         "build.zig",

@@ -27,260 +27,61 @@ pub fn run() void {
     singleton.run();
 }
 
-fn buildWrongContext(vm: *zlua.Lua) i32 {
-    _ = vm;
-    log.err(error.BuildContextWrongContext, "You can't run this function in the build context", .{});
-    return 0;
-}
+const lua = struct {
+    const ffi = @import("ffi");
 
-fn runWrongContext(vm: *zlua.Lua) i32 {
-    _ = vm;
-    log.err(error.RunContextWrongContext, "You can't run this function in the run context", .{});
-    return 0;
-}
-
-fn clientDocker(vm: *zlua.Lua) i32 {
-    const API_VERSION = 1;
-    const ENDPOINT = 2;
-    const METHOD = 3;
-    const PARAMETERS = 4;
-    const gpa = vm.allocator();
-    if (vm.typeOf(API_VERSION) != .string) log.err(error.ClientDockerApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(API_VERSION) });
-    const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when popping Docker API version argument from main Lua VM stack", @src());
-    if (vm.typeOf(ENDPOINT) != .string) log.err(error.ClientDockerEndpointExpectedString, "Docker endpoint argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(ENDPOINT) });
-    const endpoint = vm.toString(ENDPOINT) catch |err| log.fatal(err, "Occured when popping Docker endpoint argument from main Lua VM stack", @src());
-    if (vm.typeOf(METHOD) != .string) log.err(error.ClientDockerHttpMethodExpectedString, "HTTP method argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(METHOD) });
-    const method = vm.toString(METHOD) catch |err| log.fatal(err, "Occured when popping HTTP method argument from main Lua VM stack", @src());
-    var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
-        error.UnsupportedLuaType => log.err(error.ClientDockerParametersUnsupportedLuaType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-        error.UnsupportedLuaKeyType => log.err(error.ClientDockerParametersUnsupportedLuaKeyType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-        else => log.fatal(err, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-    };
-    defer jl.free(gpa, &parameters);
-    if (std.meta.activeTag(parameters) != .object) log.err(error.ClientDockerParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .src = @src() });
-    const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
-        .docker = .{
-            .version = api_version,
-            .endpoint = endpoint,
-            .method = method,
-            .parameters = parameters,
-        },
-    }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", @src());
-    defer gpa.free(source);
-    const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.ClientDockerUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    const output = client.sendRequestValue(parsed) catch |err| log.fatal(err, "Occured when trying to send a request", @src());
-    defer output.array.deinit();
-    jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
-
-    return 1;
-}
-
-fn clientDockerBuild(vm: *zlua.Lua) i32 {
-    const API_VERSION = 1;
-    const CONTEXT = 2;
-    const TAG = 3;
-    const PARAMETERS = 4;
-    const gpa = vm.allocator();
-    if (vm.typeOf(API_VERSION) != .string) log.err(error.ClientDockerBuildApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(API_VERSION) });
-    const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when popping Docker API version argument from main Lua VM stack", @src());
-    if (vm.typeOf(CONTEXT) != .string) log.err(error.ClientDockerBuildContextExpectedString, "Docker context argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(CONTEXT) });
-    const context = vm.toString(CONTEXT) catch |err| log.fatal(err, "Occured when popping Docker context argument from main Lua VM stack", @src());
-    if (vm.typeOf(TAG) != .string) log.err(error.ClientDockerBuildTagExpectedString, "Tag argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TAG) });
-    const tag = vm.toString(TAG) catch |err| log.fatal(err, "Occured when popping tag argument from main Lua VM stack", @src());
-    var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
-        error.UnsupportedLuaType => log.err(error.ClientDockerBuildParametersUnsupportedLuaType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-        error.UnsupportedLuaKeyType => log.err(error.ClientDockerBuildParametersUnsupportedLuaKeyType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-        else => log.fatal(err, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", @src()),
-    };
-    defer jl.free(gpa, &parameters);
-    if (std.meta.activeTag(parameters) != .object) log.err(error.ClientDockerBuildParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .src = @src() });
-    const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
-        .docker_build = .{
-            .version = api_version,
-            .ctx = context,
-            .t = tag,
-            .parameters = parameters,
-        },
-    }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", @src());
-    defer gpa.free(source);
-    const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.ClientDockerBuildUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    const output = client.sendRequestValue(parsed) catch |err| log.fatal(err, "Occured when trying to send a request", @src());
-    defer output.array.deinit();
-    jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
-    return 1;
-}
-
-fn clientJsonQuery(vm: *zlua.Lua) i32 {
-    const FILTER = 1;
-    const INPUT = 2;
-    const gpa = vm.allocator();
-    if (vm.typeOf(FILTER) != .string) log.err(error.ClientJsonQueryFilterExpectedString, "Filter argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(FILTER) });
-    const filter = vm.toString(FILTER) catch |err| log.fatal(err, "Occured when popping filter argument from main Lua VM stack", @src());
-    var input = jl.jsonFromLua(vm, INPUT) catch |err| switch (err) {
-        error.UnsupportedLuaType => log.err(error.ClientJsonQueryInputUnsupportedLuaType, "Occured when popping and converting to Json the input argument from main Lua VM stack", @src()),
-        error.UnsupportedLuaKeyType => log.err(error.ClientJsonQueryInputUnsupportedLuaKeyType, "Occured when popping and converting to Json the input argument from main Lua VM stack", @src()),
-        else => log.fatal(err, "Occured when popping and converting to Json the input argument from main Lua VM stack", @src()),
-    };
-    defer jl.free(gpa, &input);
-    const output = client.jsonQuery(filter, &input) catch |err| switch (err) {
-        error.IncorrectJqFilter => log.err(err, "The provided jq filter is incorrect", @src()),
-        error.JqHalted, error.JqInvalidMsg => log.err(err, "A jq error occured", @src()),
-        error.UnexpectedInputJsonKind => unreachable,
-        else => log.fatal(err, "Occured when trying to produce a JSON query", @src()),
-    };
-    defer output.array.deinit();
-    jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
-    return 1;
-}
-
-fn schedulerTaskDependsOn(vm: *zlua.Lua) i32 {
-    const CHILD_ID = 1;
-    const PARENT_ID = 2;
-    if (vm.typeOf(CHILD_ID) != .string) log.err(error.TaskDependsOnChildIdExpectedString, "Child argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(CHILD_ID) });
-    const child_id = vm.toString(CHILD_ID) catch |err| log.fatal(err, "Occured when popping child argument from main Lua VM stack", @src());
-    if (vm.typeOf(PARENT_ID) != .string) log.err(error.TaskDependsOnParentIdExpectedString, "Parent argument should be a string from main Lua VM stack", .{ .id = child_id, .lua_type = vm.typeOf(PARENT_ID) });
-    const parent_id = vm.toString(PARENT_ID) catch |err| log.fatal(err, "Occured when popping parent argument from main Lua VM stack", .{ .id = child_id });
-    scheduler.taskDependsOn(child_id, parent_id);
-    return 0;
-}
-
-fn schedulerNewDockerTask(vm: *zlua.Lua) i32 {
-    const TASK_ID = 1;
-    const API_VERSION = 2;
-    const ENDPOINT = 3;
-    const METHOD = 4;
-    const PARAMETERS = 5;
-    const gpa = vm.allocator();
-    if (vm.typeOf(TASK_ID) != .string) log.err(error.NewDockerTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
-    const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when popping task id argument from main Lua VM stack", @src());
-    if (vm.typeOf(API_VERSION) != .string) log.err(error.NewDockerTaskApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(API_VERSION) });
-    const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when popping Docker API version argument from main Lua VM stack", .{ .task = task_id });
-    if (vm.typeOf(ENDPOINT) != .string) log.err(error.NewDockerTaskEndpointExpectedString, "Docker endpoint argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(ENDPOINT) });
-    const endpoint = vm.toString(ENDPOINT) catch |err| log.fatal(err, "Occured when popping Docker endpoint argument from main Lua VM stack", .{ .task = task_id });
-    if (vm.typeOf(METHOD) != .string) log.err(error.NewDockerTaskHttpMethodExpectedString, "HTTP method argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(METHOD) });
-    const method = vm.toString(METHOD) catch |err| log.fatal(err, "Occured when popping HTTP method argument from main Lua VM stack", .{ .task = task_id });
-    var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
-        error.UnsupportedLuaType => log.err(error.NewDockerTaskParametersUnsupportedLuaType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-        error.UnsupportedLuaKeyType => log.err(error.NewDockerTaskParametersUnsupportedLuaKeyType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-        else => log.fatal(err, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-    };
-    defer jl.free(gpa, &parameters);
-    if (std.meta.activeTag(parameters) != .object) log.err(error.NewDockerTaskParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .task = task_id });
-    const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
-        .docker = .{
-            .version = api_version,
-            .endpoint = endpoint,
-            .method = method,
-            .parameters = parameters,
-        },
-    }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .task = task_id });
-    defer gpa.free(source);
-    const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.NewDockerTaskUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .task = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    scheduler.newRequestTask(task_id, parsed);
-    return 0;
-}
-
-fn schedulerNewDockerBuildTask(vm: *zlua.Lua) i32 {
-    const TASK_ID = 1;
-    const API_VERSION = 2;
-    const CONTEXT = 3;
-    const TAG = 4;
-    const PARAMETERS = 5;
-    const gpa = vm.allocator();
-    if (vm.typeOf(TASK_ID) != .string) log.err(error.NewDockerBuildTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
-    const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when popping task id argument from main Lua VM stack", @src());
-    if (vm.typeOf(API_VERSION) != .string) log.err(error.NewDockerBuildTaskApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(API_VERSION) });
-    const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when popping Docker API version argument from main Lua VM stack", .{ .task = task_id });
-    if (vm.typeOf(CONTEXT) != .string) log.err(error.NewDockerBuildTaskContextExpectedString, "Context argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(CONTEXT) });
-    const ctx = vm.toString(CONTEXT) catch |err| log.fatal(err, "Occured when popping context argument from main Lua VM stack", .{ .task = task_id });
-    if (vm.typeOf(TAG) != .string) log.err(error.NewDockerBuildTaskTagExpectedString, "Tag argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(TAG) });
-    const t = vm.toString(TAG) catch |err| log.fatal(err, "Occured when popping tag argument from main Lua VM stack", .{ .task = task_id });
-    var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
-        error.UnsupportedLuaType => log.err(error.NewDockerBuildTaskParametersUnsupportedLuaType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-        error.UnsupportedLuaKeyType => log.err(error.NewDockerBuildTaskParametersUnsupportedLuaKeyType, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-        else => log.fatal(err, "Occured when popping and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
-    };
-    defer jl.free(gpa, &parameters);
-    if (std.meta.activeTag(parameters) != .object) log.err(error.NewDockerBuildTaskParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .task = task_id });
-    const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
-        .docker_build = .{
-            .version = api_version,
-            .ctx = ctx,
-            .t = t,
-            .parameters = parameters,
-        },
-    }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .task = task_id });
-    defer gpa.free(source);
-    const parsed = c.jv_parse(source);
-    if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.NewDockerBuildTaskUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .task = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
-    scheduler.newRequestTask(task_id, parsed);
-    return 0;
-}
-
-fn schedulerNewCustomTask(vm: *zlua.Lua) i32 {
-    const TASK_ID = 1;
-    const LUA_FUNCTION = 2;
-    const BUILD_DATA = 3;
-    if (vm.typeOf(TASK_ID) != .string) log.err(error.NewCustomTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
-    const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when popping task id argument from main Lua VM stack", @src());
-    if (vm.typeOf(LUA_FUNCTION) != .function) log.err(error.NewCustomTaskFunctionExpectedFunction, "Second argument should be a function from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(LUA_FUNCTION) });
-
-    vm.pushValue(LUA_FUNCTION);
-    const func_ref = vm.ref(zlua.registry_index);
-    singleton.refs.append(singleton.gpa, func_ref) catch |err| log.fatal(err, "Occured when appending Lua ref into array list", .{ .task = task_id });
-
-    var build_data_ref: i32 = zlua.ref_nil;
-    if (vm.getTop() >= BUILD_DATA and vm.typeOf(BUILD_DATA) != .nil) {
-        vm.pushValue(BUILD_DATA);
-        build_data_ref = vm.ref(zlua.registry_index);
-        singleton.refs.append(singleton.gpa, build_data_ref) catch |err| log.fatal(err, "Occured when appending Lua ref into array list", .{ .task = task_id });
+    fn buildWrongContext(vm: *zlua.Lua) i32 {
+        return singleton.buildWrongContext(vm);
     }
 
-    scheduler.newCustomTask(task_id, vm.newThread(), func_ref, build_data_ref);
-    return 0;
-}
+    fn runWrongContext(vm: *zlua.Lua) i32 {
+        return singleton.runWrongContext(vm);
+    }
 
-fn schedulerNewJSONQueryTask(vm: *zlua.Lua) i32 {
-    const TASK_ID = 1;
-    const FILTER = 2;
-    if (vm.typeOf(TASK_ID) != .string) log.err(error.NewJsonQueryTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
-    const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when poping task id argument from main Lua VM stack", @src());
-    if (vm.typeOf(FILTER) != .string) log.err(error.NewJsonQueryTaskFilterExpectedString, "Filter argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(FILTER) });
-    const filter = vm.toString(FILTER) catch |err| log.fatal(err, "Occured when popping filter argument from main Lua VM stack", .{ .task = task_id });
-    scheduler.newJSONQueryTask(task_id, filter);
-    return 0;
-}
+    fn docker(vm: *zlua.Lua) i32 {
+        return singleton.docker(vm);
+    }
 
-fn newMutex(vm: *zlua.Lua) i32 {
-    const MUTEX_ID = 1;
-    if (vm.typeOf(MUTEX_ID) != .string) log.err(error.NewMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
-    const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when poping mutex id argument from main Lua VM stack", @src());
-    if (singleton.mutexes.contains(mutex_id)) log.err(error.NewMutexMutexIdAlreadyExists, "This mutex ID already exists", .{ .mutex = mutex_id });
-    const duped = singleton.gpa.dupe(u8, mutex_id) catch |err| log.fatal(err, "Occured when duping the mutex id", .{ .mutex = mutex_id });
-    singleton.mutexes.put(duped, .init) catch |err| log.fatal(err, "Occured when adding the mutex", .{ .mutex = mutex_id });
-    return 0;
-}
+    fn dockerBuild(vm: *zlua.Lua) i32 {
+        return singleton.dockerBuild(vm);
+    }
 
-fn lockMutex(vm: *zlua.Lua) i32 {
-    const MUTEX_ID = 1;
-    if (vm.typeOf(MUTEX_ID) != .string) log.err(error.LockMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
-    const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when poping mutex id argument from main Lua VM stack", @src());
-    const mutex = singleton.mutexes.getPtr(mutex_id) orelse log.err(error.LockMutexMutexIdUnknown, "Unknown mutex id", .{ .mutex = mutex_id });
-    mutex.lock(singleton.io) catch |err| log.fatal(err, "Occured when trying to lock a mutex", .{ .mutex = mutex_id });
-    return 0;
-}
+    fn jsonQuery(vm: *zlua.Lua) i32 {
+        return singleton.jsonQuery(vm);
+    }
 
-fn unlockMutex(vm: *zlua.Lua) i32 {
-    const MUTEX_ID = 1;
-    if (vm.typeOf(MUTEX_ID) != .string) log.err(error.UnlockMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
-    const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when poping mutex id argument from main Lua VM stack", @src());
-    const mutex = singleton.mutexes.getPtr(mutex_id) orelse log.err(error.UnlockMutexMutexIdUnknown, "Unknown mutex id", .{ .mutex = mutex_id });
-    mutex.unlock(singleton.io);
-    return 0;
-}
+    fn taskDependsOn(vm: *zlua.Lua) i32 {
+        return singleton.taskDependsOn(vm);
+    }
+
+    fn newDockerTask(vm: *zlua.Lua) i32 {
+        return singleton.newDockerTask(vm);
+    }
+
+    fn newDockerBuildTask(vm: *zlua.Lua) i32 {
+        return singleton.newDockerBuildTask(vm);
+    }
+
+    fn newCustomTask(vm: *zlua.Lua) i32 {
+        return singleton.newCustomTask(vm);
+    }
+
+    fn newJSONQueryTask(vm: *zlua.Lua) i32 {
+        return singleton.newJSONQueryTask(vm);
+    }
+
+    fn newMutex(vm: *zlua.Lua) i32 {
+        return singleton.newMutex(vm);
+    }
+
+    fn lockMutex(vm: *zlua.Lua) i32 {
+        return singleton.lockMutex(vm);
+    }
+
+    fn unlockMutex(vm: *zlua.Lua) i32 {
+        return singleton.unlockMutex(vm);
+    }
+};
 
 // Drive the scheduler depending of user configuration
 const Script = struct {
@@ -293,6 +94,7 @@ const Script = struct {
 
     pub fn init(self: *@This(), arena_instance: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ) void {
         scheduler.init(arena_instance, gpa, io, environ);
+        lua.ffi.init(arena_instance, gpa, io, environ);
         self.arena = arena_instance;
         self.gpa = gpa;
         self.io = io;
@@ -310,6 +112,7 @@ const Script = struct {
         while (it.next()) |key| self.gpa.free(key.*);
         self.mutexes.deinit();
         self.vm.deinit();
+        lua.ffi.deinit();
         scheduler.deinit();
     }
 
@@ -338,28 +141,28 @@ const Script = struct {
         self.vm.setGlobal("argv");
         jl.setJsonGlobals(self.vm);
 
-        self.vm.pushFunction(zlua.wrap(buildWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.buildWrongContext));
         self.vm.setGlobal("docker");
-        self.vm.pushFunction(zlua.wrap(buildWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.buildWrongContext));
         self.vm.setGlobal("dockerBuild");
-        self.vm.pushFunction(zlua.wrap(buildWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.buildWrongContext));
         self.vm.setGlobal("jsonQuery");
-        self.vm.pushFunction(zlua.wrap(buildWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.buildWrongContext));
         self.vm.setGlobal("lockMutex");
-        self.vm.pushFunction(zlua.wrap(buildWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.buildWrongContext));
         self.vm.setGlobal("unlockMutex");
 
-        self.vm.pushFunction(zlua.wrap(schedulerTaskDependsOn));
+        self.vm.pushFunction(zlua.wrap(lua.taskDependsOn));
         self.vm.setGlobal("taskDependsOn");
-        self.vm.pushFunction(zlua.wrap(schedulerNewDockerTask));
+        self.vm.pushFunction(zlua.wrap(lua.newDockerTask));
         self.vm.setGlobal("newDockerTask");
-        self.vm.pushFunction(zlua.wrap(schedulerNewDockerBuildTask));
+        self.vm.pushFunction(zlua.wrap(lua.newDockerBuildTask));
         self.vm.setGlobal("newDockerBuildTask");
-        self.vm.pushFunction(zlua.wrap(schedulerNewCustomTask));
+        self.vm.pushFunction(zlua.wrap(lua.newCustomTask));
         self.vm.setGlobal("newCustomTask");
-        self.vm.pushFunction(zlua.wrap(schedulerNewJSONQueryTask));
+        self.vm.pushFunction(zlua.wrap(lua.newJSONQueryTask));
         self.vm.setGlobal("newJsonQueryTask");
-        self.vm.pushFunction(zlua.wrap(newMutex));
+        self.vm.pushFunction(zlua.wrap(lua.newMutex));
         self.vm.setGlobal("newMutex");
 
         const TOP_OF_STACK = -1;
@@ -367,6 +170,8 @@ const Script = struct {
         const RUNTABLE_NPOS = -2;
         const BUILD_INSTANCE_NPOS = -2;
         const BUILD_INSTANCE_LEN = 1;
+
+        lua.ffi.setBuildGlobals(self.vm);
 
         self.vm.newTable();
         self.vm.pushValue(TOP_OF_STACK);
@@ -426,30 +231,292 @@ const Script = struct {
     }
 
     pub fn run(self: @This()) void {
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("taskDependsOn");
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("newDockerTask");
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("newDockerBuildTask");
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("newCustomTask");
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("newJsonQueryTask");
-        self.vm.pushFunction(zlua.wrap(runWrongContext));
+        self.vm.pushFunction(zlua.wrap(lua.runWrongContext));
         self.vm.setGlobal("newMutex");
 
-        self.vm.pushFunction(zlua.wrap(clientDocker));
+        self.vm.pushFunction(zlua.wrap(lua.docker));
         self.vm.setGlobal("docker");
-        self.vm.pushFunction(zlua.wrap(clientDockerBuild));
+        self.vm.pushFunction(zlua.wrap(lua.dockerBuild));
         self.vm.setGlobal("dockerBuild");
-        self.vm.pushFunction(zlua.wrap(clientJsonQuery));
+        self.vm.pushFunction(zlua.wrap(lua.jsonQuery));
         self.vm.setGlobal("jsonQuery");
-        self.vm.pushFunction(zlua.wrap(lockMutex));
+        self.vm.pushFunction(zlua.wrap(lua.lockMutex));
         self.vm.setGlobal("lockMutex");
-        self.vm.pushFunction(zlua.wrap(unlockMutex));
+        self.vm.pushFunction(zlua.wrap(lua.unlockMutex));
         self.vm.setGlobal("unlockMutex");
 
         scheduler.run();
+    }
+
+    pub fn buildWrongContext(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = .{ self, vm };
+        log.err(error.BuildContextWrongContext, "You can't run this function in the build context", .{});
+        return 0;
+    }
+
+    pub fn runWrongContext(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = .{ self, vm };
+        log.err(error.RunContextWrongContext, "You can't run this function in the run context", .{});
+        return 0;
+    }
+
+    pub fn docker(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const API_VERSION = 1;
+        const ENDPOINT = 2;
+        const METHOD = 3;
+        const PARAMETERS = 4;
+        const gpa = vm.allocator();
+        if (vm.typeOf(API_VERSION) != .string) log.err(error.ClientDockerApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(API_VERSION) });
+        const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when reading Docker API version argument from main Lua VM stack", @src());
+        if (vm.typeOf(ENDPOINT) != .string) log.err(error.ClientDockerEndpointExpectedString, "Docker endpoint argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(ENDPOINT) });
+        const endpoint = vm.toString(ENDPOINT) catch |err| log.fatal(err, "Occured when reading Docker endpoint argument from main Lua VM stack", @src());
+        if (vm.typeOf(METHOD) != .string) log.err(error.ClientDockerHttpMethodExpectedString, "HTTP method argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(METHOD) });
+        const method = vm.toString(METHOD) catch |err| log.fatal(err, "Occured when reading HTTP method argument from main Lua VM stack", @src());
+        var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
+            error.UnsupportedLuaType => log.err(error.ClientDockerParametersUnsupportedLuaType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+            error.UnsupportedLuaKeyType => log.err(error.ClientDockerParametersUnsupportedLuaKeyType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+            else => log.fatal(err, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+        };
+        defer jl.free(gpa, &parameters);
+        if (std.meta.activeTag(parameters) != .object) log.err(error.ClientDockerParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .src = @src() });
+        const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
+            .docker = .{
+                .version = api_version,
+                .endpoint = endpoint,
+                .method = method,
+                .parameters = parameters,
+            },
+        }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", @src());
+        defer gpa.free(source);
+        const parsed = c.jv_parse(source);
+        if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.ClientDockerUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+        const output = client.sendRequestValue(parsed) catch |err| log.fatal(err, "Occured when trying to send a request", @src());
+        defer output.array.deinit();
+        jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
+
+        return 1;
+    }
+
+    pub fn dockerBuild(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const API_VERSION = 1;
+        const CONTEXT = 2;
+        const TAG = 3;
+        const PARAMETERS = 4;
+        const gpa = vm.allocator();
+        if (vm.typeOf(API_VERSION) != .string) log.err(error.ClientDockerBuildApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(API_VERSION) });
+        const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when reading Docker API version argument from main Lua VM stack", @src());
+        if (vm.typeOf(CONTEXT) != .string) log.err(error.ClientDockerBuildContextExpectedString, "Docker context argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(CONTEXT) });
+        const context = vm.toString(CONTEXT) catch |err| log.fatal(err, "Occured when reading Docker context argument from main Lua VM stack", @src());
+        if (vm.typeOf(TAG) != .string) log.err(error.ClientDockerBuildTagExpectedString, "Tag argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TAG) });
+        const tag = vm.toString(TAG) catch |err| log.fatal(err, "Occured when reading tag argument from main Lua VM stack", @src());
+        var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
+            error.UnsupportedLuaType => log.err(error.ClientDockerBuildParametersUnsupportedLuaType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+            error.UnsupportedLuaKeyType => log.err(error.ClientDockerBuildParametersUnsupportedLuaKeyType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+            else => log.fatal(err, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", @src()),
+        };
+        defer jl.free(gpa, &parameters);
+        if (std.meta.activeTag(parameters) != .object) log.err(error.ClientDockerBuildParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .src = @src() });
+        const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
+            .docker_build = .{
+                .version = api_version,
+                .ctx = context,
+                .t = tag,
+                .parameters = parameters,
+            },
+        }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", @src());
+        defer gpa.free(source);
+        const parsed = c.jv_parse(source);
+        if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.ClientDockerBuildUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .src = @src(), .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+        const output = client.sendRequestValue(parsed) catch |err| log.fatal(err, "Occured when trying to send a request", @src());
+        defer output.array.deinit();
+        jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
+        return 1;
+    }
+
+    pub fn jsonQuery(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const FILTER = 1;
+        const INPUT = 2;
+        const gpa = vm.allocator();
+        if (vm.typeOf(FILTER) != .string) log.err(error.ClientJsonQueryFilterExpectedString, "Filter argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(FILTER) });
+        const filter = vm.toString(FILTER) catch |err| log.fatal(err, "Occured when reading filter argument from main Lua VM stack", @src());
+        var input = jl.jsonFromLua(vm, INPUT) catch |err| switch (err) {
+            error.UnsupportedLuaType => log.err(error.ClientJsonQueryInputUnsupportedLuaType, "Occured when reading and converting to Json the input argument from main Lua VM stack", @src()),
+            error.UnsupportedLuaKeyType => log.err(error.ClientJsonQueryInputUnsupportedLuaKeyType, "Occured when reading and converting to Json the input argument from main Lua VM stack", @src()),
+            else => log.fatal(err, "Occured when reading and converting to Json the input argument from main Lua VM stack", @src()),
+        };
+        defer jl.free(gpa, &input);
+        const output = client.jsonQuery(filter, &input) catch |err| switch (err) {
+            error.IncorrectJqFilter => log.err(err, "The provided jq filter is incorrect", @src()),
+            error.JqHalted, error.JqInvalidMsg => log.err(err, "A jq error occured", @src()),
+            error.UnexpectedInputJsonKind => unreachable,
+            else => log.fatal(err, "Occured when trying to produce a JSON query", @src()),
+        };
+        defer output.array.deinit();
+        jl.luaFromJson(vm, &output) catch |err| log.fatal(err, "Occured when converting output from Json to Lua value", @src());
+        return 1;
+    }
+
+    pub fn taskDependsOn(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const CHILD_ID = 1;
+        const PARENT_ID = 2;
+        if (vm.typeOf(CHILD_ID) != .string) log.err(error.TaskDependsOnChildIdExpectedString, "Child argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(CHILD_ID) });
+        const child_id = vm.toString(CHILD_ID) catch |err| log.fatal(err, "Occured when reading child argument from main Lua VM stack", @src());
+        if (vm.typeOf(PARENT_ID) != .string) log.err(error.TaskDependsOnParentIdExpectedString, "Parent argument should be a string from main Lua VM stack", .{ .id = child_id, .lua_type = vm.typeOf(PARENT_ID) });
+        const parent_id = vm.toString(PARENT_ID) catch |err| log.fatal(err, "Occured when reading parent argument from main Lua VM stack", .{ .id = child_id });
+        scheduler.taskDependsOn(child_id, parent_id);
+        return 0;
+    }
+
+    pub fn newDockerTask(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const TASK_ID = 1;
+        const API_VERSION = 2;
+        const ENDPOINT = 3;
+        const METHOD = 4;
+        const PARAMETERS = 5;
+        const gpa = vm.allocator();
+        if (vm.typeOf(TASK_ID) != .string) log.err(error.NewDockerTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
+        const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when reading task id argument from main Lua VM stack", @src());
+        if (vm.typeOf(API_VERSION) != .string) log.err(error.NewDockerTaskApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(API_VERSION) });
+        const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when reading Docker API version argument from main Lua VM stack", .{ .task = task_id });
+        if (vm.typeOf(ENDPOINT) != .string) log.err(error.NewDockerTaskEndpointExpectedString, "Docker endpoint argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(ENDPOINT) });
+        const endpoint = vm.toString(ENDPOINT) catch |err| log.fatal(err, "Occured when reading Docker endpoint argument from main Lua VM stack", .{ .task = task_id });
+        if (vm.typeOf(METHOD) != .string) log.err(error.NewDockerTaskHttpMethodExpectedString, "HTTP method argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(METHOD) });
+        const method = vm.toString(METHOD) catch |err| log.fatal(err, "Occured when reading HTTP method argument from main Lua VM stack", .{ .task = task_id });
+        var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
+            error.UnsupportedLuaType => log.err(error.NewDockerTaskParametersUnsupportedLuaType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+            error.UnsupportedLuaKeyType => log.err(error.NewDockerTaskParametersUnsupportedLuaKeyType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+            else => log.fatal(err, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+        };
+        defer jl.free(gpa, &parameters);
+        if (std.meta.activeTag(parameters) != .object) log.err(error.NewDockerTaskParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .task = task_id });
+        const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
+            .docker = .{
+                .version = api_version,
+                .endpoint = endpoint,
+                .method = method,
+                .parameters = parameters,
+            },
+        }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .task = task_id });
+        defer gpa.free(source);
+        const parsed = c.jv_parse(source);
+        if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.NewDockerTaskUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .task = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+        scheduler.newRequestTask(task_id, parsed);
+        return 0;
+    }
+
+    pub fn newDockerBuildTask(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const TASK_ID = 1;
+        const API_VERSION = 2;
+        const CONTEXT = 3;
+        const TAG = 4;
+        const PARAMETERS = 5;
+        const gpa = vm.allocator();
+        if (vm.typeOf(TASK_ID) != .string) log.err(error.NewDockerBuildTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
+        const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when reading task id argument from main Lua VM stack", @src());
+        if (vm.typeOf(API_VERSION) != .string) log.err(error.NewDockerBuildTaskApiVersionExpectedString, "Docker API version argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(API_VERSION) });
+        const api_version = vm.toString(API_VERSION) catch |err| log.fatal(err, "Occured when reading Docker API version argument from main Lua VM stack", .{ .task = task_id });
+        if (vm.typeOf(CONTEXT) != .string) log.err(error.NewDockerBuildTaskContextExpectedString, "Context argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(CONTEXT) });
+        const ctx = vm.toString(CONTEXT) catch |err| log.fatal(err, "Occured when reading context argument from main Lua VM stack", .{ .task = task_id });
+        if (vm.typeOf(TAG) != .string) log.err(error.NewDockerBuildTaskTagExpectedString, "Tag argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(TAG) });
+        const t = vm.toString(TAG) catch |err| log.fatal(err, "Occured when reading tag argument from main Lua VM stack", .{ .task = task_id });
+        var parameters = jl.jsonFromLua(vm, PARAMETERS) catch |err| switch (err) {
+            error.UnsupportedLuaType => log.err(error.NewDockerBuildTaskParametersUnsupportedLuaType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+            error.UnsupportedLuaKeyType => log.err(error.NewDockerBuildTaskParametersUnsupportedLuaKeyType, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+            else => log.fatal(err, "Occured when reading and converting to Json the parameters argument from main Lua VM stack", .{ .task = task_id }),
+        };
+        defer jl.free(gpa, &parameters);
+        if (std.meta.activeTag(parameters) != .object) log.err(error.NewDockerBuildTaskParametersUnexpectedJsonKind, "Parameters argument must be an object json kind", .{ .json_kind = std.meta.activeTag(parameters), .task = task_id });
+        const source = gpa.printSentinel("{f}", .{std.json.fmt(.{
+            .docker_build = .{
+                .version = api_version,
+                .ctx = ctx,
+                .t = t,
+                .parameters = parameters,
+            },
+        }, .{})}, 0) catch |err| log.fatal(err, "Occured when allocating for string", .{ .task = task_id });
+        defer gpa.free(source);
+        const parsed = c.jv_parse(source);
+        if (c.jv_get_kind(parsed) != c.JV_KIND_OBJECT) log.fatal(error.NewDockerBuildTaskUnexpectedJsonKind, "Expecting an object json kind after jv parsing", .{ .task = task_id, .kind = std.mem.span(c.jv_kind_name(c.jv_get_kind(parsed))) });
+        scheduler.newRequestTask(task_id, parsed);
+        return 0;
+    }
+
+    pub fn newCustomTask(self: *@This(), vm: *zlua.Lua) i32 {
+        const TASK_ID = 1;
+        const LUA_FUNCTION = 2;
+        const BUILD_DATA = 3;
+        if (vm.typeOf(TASK_ID) != .string) log.err(error.NewCustomTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
+        const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when reading task id argument from main Lua VM stack", @src());
+        if (vm.typeOf(LUA_FUNCTION) != .function) log.err(error.NewCustomTaskFunctionExpectedFunction, "Second argument should be a function from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(LUA_FUNCTION) });
+
+        vm.pushValue(LUA_FUNCTION);
+        const func_ref = vm.ref(zlua.registry_index);
+        self.refs.append(self.gpa, func_ref) catch |err| log.fatal(err, "Occured when appending Lua ref into array list", .{ .task = task_id });
+
+        var build_data_ref: i32 = zlua.ref_nil;
+        if (vm.getTop() >= BUILD_DATA and vm.typeOf(BUILD_DATA) != .nil) {
+            vm.pushValue(BUILD_DATA);
+            build_data_ref = vm.ref(zlua.registry_index);
+            self.refs.append(self.gpa, build_data_ref) catch |err| log.fatal(err, "Occured when appending Lua ref into array list", .{ .task = task_id });
+        }
+
+        scheduler.newCustomTask(task_id, vm.newThread(), func_ref, build_data_ref);
+        return 0;
+    }
+
+    pub fn newJSONQueryTask(self: *@This(), vm: *zlua.Lua) i32 {
+        _ = self;
+        const TASK_ID = 1;
+        const FILTER = 2;
+        if (vm.typeOf(TASK_ID) != .string) log.err(error.NewJsonQueryTaskTaskIdExpectedString, "Task id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(TASK_ID) });
+        const task_id = vm.toString(TASK_ID) catch |err| log.fatal(err, "Occured when reading task id argument from main Lua VM stack", @src());
+        if (vm.typeOf(FILTER) != .string) log.err(error.NewJsonQueryTaskFilterExpectedString, "Filter argument should be a string from main Lua VM stack", .{ .task = task_id, .lua_type = vm.typeOf(FILTER) });
+        const filter = vm.toString(FILTER) catch |err| log.fatal(err, "Occured when reading filter argument from main Lua VM stack", .{ .task = task_id });
+        scheduler.newJSONQueryTask(task_id, filter);
+        return 0;
+    }
+
+    pub fn newMutex(self: *@This(), vm: *zlua.Lua) i32 {
+        const MUTEX_ID = 1;
+        if (vm.typeOf(MUTEX_ID) != .string) log.err(error.NewMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
+        const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when reading mutex id argument from main Lua VM stack", @src());
+        if (self.mutexes.contains(mutex_id)) log.err(error.NewMutexMutexIdAlreadyExists, "This mutex ID already exists", .{ .mutex = mutex_id });
+        const duped = self.gpa.dupe(u8, mutex_id) catch |err| log.fatal(err, "Occured when duping the mutex id", .{ .mutex = mutex_id });
+        self.mutexes.put(duped, .init) catch |err| log.fatal(err, "Occured when adding the mutex", .{ .mutex = mutex_id });
+        return 0;
+    }
+
+    pub fn lockMutex(self: *@This(), vm: *zlua.Lua) i32 {
+        const MUTEX_ID = 1;
+        if (vm.typeOf(MUTEX_ID) != .string) log.err(error.LockMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
+        const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when reading mutex id argument from main Lua VM stack", @src());
+        const mutex = self.mutexes.getPtr(mutex_id) orelse log.err(error.LockMutexMutexIdUnknown, "Unknown mutex id", .{ .mutex = mutex_id });
+        mutex.lock(self.io) catch |err| log.fatal(err, "Occured when trying to lock a mutex", .{ .mutex = mutex_id });
+        return 0;
+    }
+
+    pub fn unlockMutex(self: *@This(), vm: *zlua.Lua) i32 {
+        const MUTEX_ID = 1;
+        if (vm.typeOf(MUTEX_ID) != .string) log.err(error.UnlockMutexMutexIdExpectedString, "Mutex id argument should be a string from main Lua VM stack", .{ .src = @src(), .lua_type = vm.typeOf(MUTEX_ID) });
+        const mutex_id = vm.toString(MUTEX_ID) catch |err| log.fatal(err, "Occured when reading mutex id argument from main Lua VM stack", @src());
+        const mutex = self.mutexes.getPtr(mutex_id) orelse log.err(error.UnlockMutexMutexIdUnknown, "Unknown mutex id", .{ .mutex = mutex_id });
+        mutex.unlock(self.io);
+        return 0;
     }
 };

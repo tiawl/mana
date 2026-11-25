@@ -5,14 +5,16 @@
   - add log level:
     - add more debug and informations
     - configure hook ?
+  - remove jq dependency
+  - remove src/client.zig and dispatch its content
 - main quest:
-  - add plugin system for custom tasks/modules:
-    - see how zig fetch and manage dependencies
-    - lua load hook
-    - merge plugins build.zig with mana build.zig
-  - make jq a plugin
-  - test plugins:
-    - jq
-    - ssh
-  - add a way to defer tasks into lua ?
+  - ffi: libffi + arocc
+  - ffi:
+    - ffi.new()
+    - ffi.ctype(string) returns an ffi.Ctype
+    - ffi.typeof()
+    - ffi.addressof()
+    - ffi.os ffi.arch
+  - test ffi
+  - add teal support ?
   - doc

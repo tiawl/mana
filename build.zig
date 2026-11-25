@@ -114,8 +114,7 @@ fn buildBuildkitModule(builder: *std.Build, target: std.Build.ResolvedTarget, op
     };
 }
 
-fn buildJQModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) !*std.Build.Module {
-    const translate_c_dep = builder.dependency("translate_c", .{});
+fn buildJQModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, translate_c_dep: *std.Build.Dependency) !*std.Build.Module {
     const jq_builder = builder.dependency("jq", .{}).builder;
     const flags = [_][]const u8{
         "-DIEEE_8087=1", "-D_GNU_SOURCE=1", "-DUSE_DECNUM=1", // TODO: "-DHAVE_LIBONIG=1",
@@ -234,6 +233,35 @@ fn buildJsonLuaModule(builder: *std.Build, target: std.Build.ResolvedTarget, opt
     });
 }
 
+fn buildFfiModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, translate_c_dep: *std.Build.Dependency, zlua_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+    const aro_dep = translate_c_dep.builder.dependency("aro", .{ .target = target, .optimize = optimize });
+    const libffi_dep = builder.dependency("libffi", .{ .target = target, .optimize = optimize });
+
+    const translate_libffi = TranslateC.init(translate_c_dep, .{
+        .c_source_file = builder.addWriteFiles().add("ffi_mod.h",
+            \\#include "ffi.h"
+        ),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const libffi_lib = libffi_dep.artifact("ffi");
+    translate_libffi.addIncludePath(libffi_lib.getEmittedIncludeTree());
+    translate_libffi.linkLibrary(libffi_lib);
+
+    return builder.createModule(.{
+        .root_source_file = builder.path(builder.pathResolve(&.{ "src", "ffi.zig" })),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "aro", .module = aro_dep.module("aro") },
+            .{ .name = "zlua", .module = zlua_mod },
+            .{ .name = "log", .module = log_mod },
+            .{ .name = "libffi", .module = translate_libffi.mod },
+        },
+    });
+}
+
 fn buildSchedulerModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, client_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "scheduler.zig" })),
@@ -249,7 +277,7 @@ fn buildSchedulerModule(builder: *std.Build, target: std.Build.ResolvedTarget, o
     });
 }
 
-fn buildScriptModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options_mod: *std.Build.Module, client_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
+fn buildScriptModule(builder: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options_mod: *std.Build.Module, client_mod: *std.Build.Module, scheduler_mod: *std.Build.Module, jq_mod: *std.Build.Module, ffi_mod: *std.Build.Module, zlua_mod: *std.Build.Module, jl_mod: *std.Build.Module, log_mod: *std.Build.Module) *std.Build.Module {
     return builder.createModule(.{
         .root_source_file = builder.path(builder.pathResolve(&.{ "src", "script.zig" })),
         .target = target,
@@ -260,6 +288,7 @@ fn buildScriptModule(builder: *std.Build, target: std.Build.ResolvedTarget, opti
             .{ .name = "build", .module = options_mod },
             .{ .name = "log", .module = log_mod },
             .{ .name = "zlua", .module = zlua_mod },
+            .{ .name = "ffi", .module = ffi_mod },
             .{ .name = "jl", .module = jl_mod },
             .{ .name = "jq", .module = jq_mod },
         },
@@ -284,14 +313,16 @@ fn buildManaExecutable(builder: *std.Build, target: std.Build.ResolvedTarget, op
     const protobuf_dep = builder.dependency("protobuf", .{});
     const protobuf_mod = protobuf_dep.module("protobuf");
     const protobuf_compiler, const buildkit_mod = buildBuildkitModule(builder, target, optimize, protobuf_dep, protobuf_mod);
-    const jq_mod = try buildJQModule(builder, target, optimize);
+    const translate_c_dep = builder.dependency("translate_c", .{});
+    const jq_mod = try buildJQModule(builder, target, optimize, translate_c_dep);
     const docker_mod = buildDockerModule(builder, target, optimize, options_mod, protobuf_mod, buildkit_mod, jq_mod);
     const client_mod = buildClientModule(builder, target, optimize, docker_mod, jq_mod);
     const log_mod = buildLogModule(builder, target, optimize);
     const zlua_mod = buildZluaModule(builder, target, optimize);
     const jl_mod = buildJsonLuaModule(builder, target, optimize, zlua_mod);
     const scheduler_mod = buildSchedulerModule(builder, target, optimize, client_mod, jq_mod, zlua_mod, jl_mod, log_mod);
-    const script_mod = buildScriptModule(builder, target, optimize, options_mod, client_mod, scheduler_mod, jq_mod, zlua_mod, jl_mod, log_mod);
+    const ffi_mod = buildFfiModule(builder, target, optimize, translate_c_dep, zlua_mod, log_mod);
+    const script_mod = buildScriptModule(builder, target, optimize, options_mod, client_mod, scheduler_mod, jq_mod, ffi_mod, zlua_mod, jl_mod, log_mod);
     const mana_mod = buildManaModule(builder, target, optimize, options_mod, script_mod, log_mod);
 
     var mana_exe = builder.addExecutable(.{
